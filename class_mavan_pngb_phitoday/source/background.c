@@ -552,7 +552,7 @@ int background_functions(
 
       /** See e.g. Eq. A6 in 1811.00904. */
 
-      dp_dloga += 0.0; /** <-- This depends on a_prime_over_a, so we cannot add it now! */
+      dp_dloga += (pseudo_p_ncdm - 5*p_ncdm); /** <-- This depends on a_prime_over_a, so we cannot add it now! */
      
 
       /* (3 p_ncdm1) is the "relativistic" contribution to rho_ncdm1 */
@@ -616,16 +616,15 @@ int background_functions(
 
   /** - compute derivative of H with respect to conformal time */
   pvecback[pba->index_bg_H_prime] = - (3./2.) * (rho_tot + p_tot) * a + pba->K/a;
-  /* MAVAN Model start - MaVaN correction to dp_dloga— applied after H is available*/
-
+  /* Possible MaVaN correction to dp_dloga— applied after H is available 
   if (pba->has_ncdm == _TRUE_) {
       for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++) {
            dp_dloga += pvecback[pba->index_bg_pseudo_p_ncdm1+n_ncdm] - 5.0 * pvecback[pba->index_bg_p_ncdm1+n_ncdm] 
                     - pba->beta_ncdm*(pvecback[pba->index_bg_p_ncdm1+n_ncdm] 
                     - pvecback[pba->index_bg_pseudo_p_ncdm1+n_ncdm])*pvecback[pba->index_bg_phi_prime_scf]/(a*pvecback[pba->index_bg_H]);
       }
-  }
-  /* MAVAN Model end */
+  }*/
+
   
   /* Total energy density*/
   pvecback[pba->index_bg_rho_tot] = rho_tot;
