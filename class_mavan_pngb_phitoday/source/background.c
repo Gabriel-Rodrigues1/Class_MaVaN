@@ -495,7 +495,7 @@ int background_functions(
     /* rho_r += 3.*pvecback[pba->index_bg_p_scf]; */ //field pressure contributes radiation
     /* rho_m += pvecback[pba->index_bg_rho_scf] - 3.* pvecback[pba->index_bg_p_scf]; */ //the rest contributes matter
     /* printf(" a= %e, Omega_scf = %f, \n ",a, pvecback[pba->index_bg_rho_scf]/rho_tot );  */
-  /* MAVAN Model start */
+  /* MAVAN Model end */
   }
 
   /* ncdm */
@@ -2147,7 +2147,7 @@ int background_solve(
   /**  - store information in the background structure */
   /* MAVAN Model start - store value of phi_today  */
   pba->phi_today_scf = pba->background_table[(pba->bt_size-1)*pba->bg_size + pba->index_bg_phi_scf];
-  /* MAVAN Model start */
+  /* MAVAN Model end */
   pba->Omega0_m = pba->background_table[(pba->bt_size-1)*pba->bg_size+pba->index_bg_Omega_m];
   pba->Omega0_r = pba->background_table[(pba->bt_size-1)*pba->bg_size+pba->index_bg_Omega_r];
   pba->Omega0_de = 1. - (pba->Omega0_m + pba->Omega0_r + pba->Omega0_k);
@@ -2888,9 +2888,8 @@ int background_output_budget(
 
     if (pba->N_ncdm > 0) {
       printf(" ---> Non-Cold Dark Matter Species (incl. massive neutrinos)\n"); 
-     /* MAVAN Model start */
       printf(" -> Omega_m = %f\n",pba->Omega0_m);
-      /* MAVAN Model start */
+
     }
     if (pba->N_ncdm > 0) {
       for (index_ncdm=0;index_ncdm<pba->N_ncdm;++index_ncdm) {
