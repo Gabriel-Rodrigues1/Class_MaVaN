@@ -1,0 +1,13 @@
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --tasks-per-node=64
+#SBATCH --qos=long 
+
+#SBATCH -o outerr/log.out.%j
+#SBATCH -e outerr/log.err.%j
+
+
+mpirun -n 4 cobaya-run  mnu_mavan.yaml -r
+
+
+
