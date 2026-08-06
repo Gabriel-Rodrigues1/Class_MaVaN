@@ -331,6 +331,7 @@ cdef class Class:
         _pars = {
             "output":"tCl mPk",}
         self.set(**_pars)
+
     def __cinit__(self, default=False):
         cdef char* dumc
         self.allocated = False
@@ -351,7 +352,6 @@ cdef class Class:
         path_to_this_as_bytes = resource_path.encode()
         dumc = path_to_this_as_bytes
         sprintf(self.path_to_this,"%s",dumc)
-
 
     def __dealloc__(self):
         if self.allocated:
@@ -3576,10 +3576,6 @@ cdef class Class:
                 value = self.ba.Omega0_m
             elif name == 'omega_m':
                 value = self.ba.Omega0_m*self.ba.h**2
-            elif name == 'scf_lambda':
-                value = self.ba.scf_lambda
-            elif name == 'beta_ncdm':
-                value = self.ba.beta_ncdm
             elif name == 'xi_idr':
                 value = self.ba.T_idr/self.ba.T_cmb
             elif name == 'N_dg':

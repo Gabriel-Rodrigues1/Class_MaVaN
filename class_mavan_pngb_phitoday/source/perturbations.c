@@ -27,6 +27,56 @@
 #include "perturbations.h"
 #include "parallel.h"
 
+/**
+ * Return the background MaVaN mass used by all ncdm momentum integrals.
+ *
+ * Physical equation (Brookfield et al., Eq. 13, normalized at a=1):
+ *
+ *   m_nu(phi_bar) = m_nu,0 exp[beta (phi_bar-phi_0)] .
+ *
+ * CLASS stores M_ncdm=m_nu,0/T_ncdm,0, so this helper returns the same
+ * dimensionless mass with the exponential evaluated on the BACKGROUND field.
+ * delta_phi must never be passed here: its first-order contribution belongs
+ * explicitly in delta-rho_nu and delta-p_nu (paper Eq. 27 and the pressure
+ * equation immediately following Eq. 28).
+ */
+static int perturbations_mavan_effective_mass(
+                                               struct background *pba,
+                                               int n_ncdm,
+                                               double phi_bg,
+                                               double *Meff,
+                                               ErrorMsg error_message
+                                               ) {
+  double exponent;
+
+  /* Exact standard-CLASS limit.  This branch does not access phi_0 and is
+     therefore also safe when an uncoupled run contains ncdm but no scf. */
+  if (pba->beta_ncdm == 0.0) {
+    *Meff = pba->M_ncdm[n_ncdm];
+    return _SUCCESS_;
+  }
+
+  /* Exponent in m_nu(phi_bar)=m_nu,0 exp[beta(phi_bar-phi_0)]. */
+  exponent = pba->beta_ncdm*(phi_bg-pba->phi_today_scf);
+
+  /* exp(x) overflows close to x=709 in IEEE double precision. */
+  class_test(!isfinite(exponent) || exponent > 700.0 || exponent < -700.0,
+             error_message,
+             "MaVaN exponent beta*(phi_bar-phi_0)=%e is outside the safe range",
+             exponent);
+
+  /* No factor of a belongs here; a enters epsilon^2=q^2+a^2 M_eff^2. */
+  *Meff = pba->M_ncdm[n_ncdm]*exp(exponent);
+
+  class_test(!isfinite(*Meff) || *Meff < 0.0,
+             error_message,
+             "non-finite or negative MaVaN effective mass M_eff[%d]=%e",
+             n_ncdm,
+             *Meff);
+
+  return _SUCCESS_;
+}
+
 
 /**
  * Source function \f$ S^{X} (k, \tau) \f$ at a given conformal time tau.
@@ -722,6 +772,20 @@ int perturbations_init(
     if (ppt->perturbations_verbose > 0)
       printf("Computing sources\n");
   }
+
+  /* Section III and the erratum of arXiv:astro-ph/0512367v3 derive the
+     coupled perturbation system in synchronous gauge.  Applying those source
+     terms in Newtonian gauge would require the corresponding gauge-dependent
+     Boltzmann and Klein-Gordon equations. */
+  class_test((pba->beta_ncdm != 0.0) && (ppt->gauge != synchronous),
+             ppt->error_message,
+             "beta_ncdm != 0 is implemented only in synchronous gauge, as in arXiv:astro-ph/0512367v3");
+
+  /* A nonzero MaVaN interaction needs both ends of the energy exchange. */
+  class_test((pba->beta_ncdm != 0.0) &&
+             ((pba->has_scf == _FALSE_) || (pba->has_ncdm == _FALSE_)),
+             ppt->error_message,
+             "beta_ncdm != 0 requires both scf and at least one ncdm species");
 
   class_test((ppt->gauge == synchronous) && (pba->has_cdm == _FALSE_),
              ppt->error_message,
@@ -3839,8 +3903,6 @@ int perturbations_vector_init(
   double rho_plus_p_ncdm,q,q2,epsilon,a,factor;
   /* MAVAN Model start */
   double Meff;
-
-  double phi_scf;
   /* MAVAN Model end */
   /** - allocate a new perturbations_vector structure to which ppw-->pv will point at the end of the routine */
 
@@ -4920,7 +4982,7 @@ int perturbations_vector_init(
          of variables */
 
       if (pba->has_ncdm == _TRUE_) {
-        
+
         if ((pa_old[ppw->index_ap_ncdmfa] == (int)ncdmfa_off) && (ppw->approx[ppw->index_ap_ncdmfa] == (int)ncdmfa_on)) {
 
           if (ppt->perturbations_verbose>2)
@@ -5027,10 +5089,17 @@ int perturbations_vector_init(
           a = ppw->pvecback[pba->index_bg_a];
           index_pt = ppw->pv->index_pt_psi0_ncdm1;
           for (n_ncdm = 0; n_ncdm < ppv->N_ncdm; n_ncdm++){
-            /* MAVAN Model start */
-            phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-            Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
             // We are in the fluid approximation, so ncdm_l_size is always 3.
+            class_call(perturbations_mavan_effective_mass(
+                                                               pba,
+                                                               n_ncdm,
+                                                               (pba->has_scf == _TRUE_)
+                                                               ? ppw->pvecback[pba->index_bg_phi_scf]
+                                                               : 0.0,
+                                                               &Meff,
+                                                               ppt->error_message),
+                       ppt->error_message,
+                       ppt->error_message);
             ncdm_l_size = ppv->l_max_ncdm[n_ncdm]+1;
             rho_plus_p_ncdm = ppw->pvecback[pba->index_bg_rho_ncdm1+n_ncdm]+
               ppw->pvecback[pba->index_bg_p_ncdm1+n_ncdm];
@@ -5043,10 +5112,17 @@ int perturbations_vector_init(
               q = pba->q_ncdm[n_ncdm][index_q];
               q2 = q*q;
               epsilon = sqrt(q2+a*a*Meff*Meff);
-            /* MAVAN Model end */
               ppv->y[ppv->index_pt_psi0_ncdm1+ncdm_l_size*n_ncdm] +=
-                pba->w_ncdm[n_ncdm][index_q]*q2*epsilon*
-                ppw->pv->y[index_pt];
+                pba->w_ncdm[n_ncdm][index_q]*q2*
+                (epsilon*ppw->pv->y[index_pt]
+                 /* Brookfield Eq. (27): delta epsilon=(a^2 m^2/epsilon)
+                    beta*delta_phi.  This term is part of delta-rho_nu
+                    when the exact hierarchy is projected onto the fluid. */
+                 +((pba->beta_ncdm != 0.0)
+                   ? pba->beta_ncdm
+                   *ppw->pv->y[ppw->pv->index_pt_phi_scf]
+                   *a*a*Meff*Meff/epsilon
+                   : 0.0));
 
               ppv->y[ppv->index_pt_psi0_ncdm1+ncdm_l_size*n_ncdm+1] +=
                 pba->w_ncdm[n_ncdm][index_q]*q2*q*
@@ -5292,6 +5368,9 @@ int perturbations_initial_conditions(struct precision * ppr,
   double delta_ur=0.,theta_ur=0.,shear_ur=0.,l3_ur=0.,eta=0.,delta_cdm=0.,alpha, alpha_prime;
   double delta_dr=0;
   double q,epsilon,k2;
+    /* MAVAN Model start */
+  double Meff;
+  /* MAVAN Model end */
   int index_q,n_ncdm,idx;
   double rho_r,rho_m,rho_nu,rho_m_over_rho_r, rho_cdm =0.;
   double fracnu,fracg,fracb,fraccdm = 0.,fracidm = 0.;
@@ -5303,10 +5382,8 @@ int perturbations_initial_conditions(struct precision * ppr,
   double velocity_tot;
   double s2_squared;
   double h_corr_2,rho_fs; //For corrections to initial conditions to tensor modes
-    /* MAVAN Model start */
-  double Meff;
-  double phi_scf;
-  /* MAVAN Model end */
+
+
   /** - (a) compute relevant background quantities: compute rho_r,
       rho_m, rho_nu (= all relativistic except photons), and their
       ratio. rho_r is needed for both scalars and tensors */
@@ -5813,18 +5890,24 @@ int perturbations_initial_conditions(struct precision * ppr,
     }
 
     if (pba->has_ncdm == _TRUE_) {
-
       idx = ppw->pv->index_pt_psi0_ncdm1;
       for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++){
-        /* MAVAN Model start */
-        phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-        Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
+        class_call(perturbations_mavan_effective_mass(
+                                                           pba,
+                                                           n_ncdm,
+                                                           (pba->has_scf == _TRUE_)
+                                                           ? ppw->pvecback[pba->index_bg_phi_scf]
+                                                           : 0.0,
+                                                           &Meff,
+                                                           ppt->error_message),
+                   ppt->error_message,
+                   ppt->error_message);
         for (index_q=0; index_q < ppw->pv->q_size_ncdm[n_ncdm]; index_q++) {
 
           q = pba->q_ncdm[n_ncdm][index_q];
 
           epsilon = sqrt(q*q+a*a*Meff*Meff);
-        /* MAVAN Model end */
+
           ppw->pv->y[idx] = -0.25 * delta_ur * pba->dlnf0_dlnq_ncdm[n_ncdm][index_q];
 
           ppw->pv->y[idx+1] =  -epsilon/3./q/k*theta_ur* pba->dlnf0_dlnq_ncdm[n_ncdm][index_q];
@@ -6781,7 +6864,6 @@ int perturbations_total_stress_energy(
   double delta_rho_m=0.;
   double rho_plus_p_m=0.;
   double rho_plus_p_theta_m=0.;
-  struct perturbations_vector * pv;
   double delta_g=0.;
   double theta_g=0.;
   double shear_g=0.;
@@ -6792,7 +6874,6 @@ int perturbations_total_stress_energy(
   double theta_idr=0.;
   double shear_idr=0.;
   double rho_delta_ncdm=0.;
-
   double rho_plus_p_theta_ncdm=0.;
   double rho_plus_p_shear_ncdm=0.;
   double delta_p_ncdm=0.;
@@ -6800,12 +6881,14 @@ int perturbations_total_stress_energy(
   double rho_plus_p_ncdm;
   int index_q,n_ncdm,idx;
   double epsilon,q,q2,cg2_ncdm,w_ncdm,rho_ncdm_bg,p_ncdm_bg,pseudo_p_ncdm;
+  /* MAVAN Model start */
+  double Meff;
+  /* MAVAN Model end */
   double w_fld,dw_over_da_fld,integral_fld;
   double gwncdm;
   double rho_relativistic;
   double rho_dr_over_f;
   double delta_rho_scf, delta_p_scf, psi;
-
   /** Variables used for FLD and PPF */
   double c_gamma_k_H_square;
   double Gamma_prime_plus_a_prime_over_a_Gamma, s2sq=1.;
@@ -6816,11 +6899,7 @@ int perturbations_total_stress_energy(
   double X, Y, Z, X_prime, Y_prime, Z_prime;
   double Gamma_fld, S, S_prime, theta_t, theta_t_prime, rho_plus_p_theta_fld_prime;
   double delta_p_b_over_rho_b;
-    /* MAVAN Model start */
-  double Meff;
-  double phi_scf;
 
-    /* MAVAN Model end */
   /** - wavenumber and scale factor related quantities */
 
   a = ppw->pvecback[pba->index_bg_a];
@@ -7065,6 +7144,10 @@ int perturbations_total_stress_energy(
 
     /* non-cold dark matter contribution */
     if (pba->has_ncdm == _TRUE_) {
+      /* Brookfield Eq. (29) needs the sum over all coupled ncdm species. Rebuild
+         these two sources on every call, for both hierarchy branches. */
+      ppw->rho_delta_ncdm = 0.0;
+      ppw->delta_p_ncdm = 0.0;
       idx = ppw->pv->index_pt_psi0_ncdm1;
       if (ppw->approx[ppw->index_ap_ncdmfa] == (int)ncdmfa_on){
         // The perturbations are evolved integrated:
@@ -7085,7 +7168,14 @@ int perturbations_total_stress_energy(
           ppw->delta_rho += rho_ncdm_bg*y[idx];
           ppw->rho_plus_p_theta += rho_plus_p_ncdm*y[idx+1];
           ppw->rho_plus_p_shear += rho_plus_p_ncdm*y[idx+2];
-          ppw->delta_p += cg2_ncdm*rho_ncdm_bg*y[idx];
+          delta_p_ncdm = cg2_ncdm*rho_ncdm_bg*y[idx];
+          ppw->delta_p += delta_p_ncdm;
+
+          /* Fluid representation of the source
+               delta-rho_nu-3 delta-p_nu
+             entering the perturbed Klein-Gordon equation (3.12). */
+          ppw->rho_delta_ncdm += rho_ncdm_bg*y[idx];
+          ppw->delta_p_ncdm += delta_p_ncdm;
 
           ppw->rho_plus_p_tot += rho_plus_p_ncdm;
 
@@ -7095,9 +7185,16 @@ int perturbations_total_stress_energy(
       else{
         // We must integrate to find perturbations:
         for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++){
-          /* MAVAN Model start */
-          phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-          Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
+          class_call(perturbations_mavan_effective_mass(
+                                                             pba,
+                                                             n_ncdm,
+                                                             (pba->has_scf == _TRUE_)
+                                                             ? ppw->pvecback[pba->index_bg_phi_scf]
+                                                             : 0.0,
+                                                             &Meff,
+                                                             ppt->error_message),
+                     ppt->error_message,
+                     ppt->error_message);
           rho_delta_ncdm = 0.0;
           rho_plus_p_theta_ncdm = 0.0;
           rho_plus_p_shear_ncdm = 0.0;
@@ -7109,13 +7206,29 @@ int perturbations_total_stress_energy(
             q = pba->q_ncdm[n_ncdm][index_q];
             q2 = q*q;
             epsilon = sqrt(q2+Meff*Meff*a2);
-         /* MAVAN Model end */
-          /* MAVAN Model start - eq 3.1 and 3.2 of https://arxiv.org/pdf/2311.01803. */ 
-            rho_delta_ncdm += q2*pba->w_ncdm[n_ncdm][index_q]*(epsilon*y[idx] + pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]*(Meff*Meff*a2/epsilon));
+
+            /* Brookfield Eq. (27): delta-rho_nu contains both the phase-space
+               perturbation Psi_0=y[idx] and delta m/m=beta*delta-phi. */
+            rho_delta_ncdm += q2*pba->w_ncdm[n_ncdm][index_q]
+              *(epsilon*y[idx]
+                +((pba->beta_ncdm != 0.0)
+                  ? pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]
+                  *Meff*Meff*a2/epsilon
+                  : 0.0));
+
             rho_plus_p_theta_ncdm += q2*q*pba->w_ncdm[n_ncdm][index_q]*y[idx+1];
             rho_plus_p_shear_ncdm += q2*q2/epsilon*pba->w_ncdm[n_ncdm][index_q]*y[idx+2];
-            delta_p_ncdm += q2*q2/epsilon*pba->w_ncdm[n_ncdm][index_q]*(y[idx] - pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]*(Meff*Meff*a2/(epsilon*epsilon)));
-           /* MAVAN Model end */ 
+
+            /* The pressure equation following Brookfield Eq. (28): varying
+               epsilon produces the opposite sign in
+               delta-p_nu and one additional inverse power of epsilon. */
+            delta_p_ncdm += q2*pba->w_ncdm[n_ncdm][index_q]
+              *(q2/epsilon)
+              *(y[idx]
+                -((pba->beta_ncdm != 0.0)
+                  ? pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]
+                  *Meff*Meff*a2/(epsilon*epsilon)
+                  : 0.0));
             //Jump to next momentum bin:
             idx+=(ppw->pv->l_max_ncdm[n_ncdm]+1);
           }
@@ -7125,7 +7238,6 @@ int perturbations_total_stress_energy(
           rho_plus_p_shear_ncdm *= 2.0/3.0*factor;
           delta_p_ncdm *= factor/3.;
 
-
           if ((ppt->has_source_delta_ncdm == _TRUE_) || (ppt->has_source_theta_ncdm == _TRUE_) || (ppt->has_source_delta_m == _TRUE_)) {
             ppw->delta_ncdm[n_ncdm] = rho_delta_ncdm/ppw->pvecback[pba->index_bg_rho_ncdm1+n_ncdm];
             ppw->theta_ncdm[n_ncdm] = rho_plus_p_theta_ncdm/
@@ -7133,8 +7245,12 @@ int perturbations_total_stress_energy(
             ppw->shear_ncdm[n_ncdm] = rho_plus_p_shear_ncdm/
               (ppw->pvecback[pba->index_bg_rho_ncdm1+n_ncdm]+ppw->pvecback[pba->index_bg_p_ncdm1+n_ncdm]);
           }
-
+          /* Sum, rather than overwrite, the Brookfield Eq. (29) source when more
+             than one ncdm species is coupled by the global beta_ncdm. */
+          ppw->rho_delta_ncdm += rho_delta_ncdm;
+          ppw->delta_p_ncdm += delta_p_ncdm;
           ppw->delta_rho += rho_delta_ncdm;
+
           ppw->rho_plus_p_theta += rho_plus_p_theta_ncdm;
           ppw->rho_plus_p_shear += rho_plus_p_shear_ncdm;
           ppw->delta_p += delta_p_ncdm;
@@ -7371,7 +7487,6 @@ int perturbations_total_stress_energy(
           rho_relativistic += ppw->pvecback[pba->index_bg_rho_ur];
 
         if (pba->has_ncdm == _TRUE_) {
-
           for (n_ncdm = 0; n_ncdm < pba->N_ncdm; n_ncdm++) {
             /* (3 p_ncdm1) is the "relativistic" contribution to rho_ncdm1 */
             rho_relativistic += 3.*ppw->pvecback[pba->index_bg_p_ncdm1+n_ncdm];
@@ -7387,15 +7502,21 @@ int perturbations_total_stress_energy(
 
     /** - --> ncdm contribution to gravitational wave source: */
     if (ppt->evolve_tensor_ncdm == _TRUE_){
-      
 
       idx = ppw->pv->index_pt_psi0_ncdm1;
 
       // We must integrate to find perturbations:
       for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++){
-        /* MAVAN Model start */
-        phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-        Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
+        class_call(perturbations_mavan_effective_mass(
+                                                           pba,
+                                                           n_ncdm,
+                                                           (pba->has_scf == _TRUE_)
+                                                           ? ppw->pvecback[pba->index_bg_phi_scf]
+                                                           : 0.0,
+                                                           &Meff,
+                                                           ppt->error_message),
+                   ppt->error_message,
+                   ppt->error_message);
         gwncdm = 0.;
 
         factor = pba->factor_ncdm[n_ncdm]/pow(a,4);
@@ -7405,7 +7526,7 @@ int perturbations_total_stress_energy(
           q = pba->q_ncdm[n_ncdm][index_q];
           q2 = q*q;
           epsilon = sqrt(q2+Meff*Meff*a2);
-        /* MAVAN Model end */
+
           gwncdm += q2*q2/epsilon*pba->w_ncdm[n_ncdm][index_q]*(1./15.*y[idx]+2./21.*y[idx+2]+1./35.*y[idx+4]);
 
           //Jump to next momentum bin:
@@ -8163,19 +8284,21 @@ int perturbations_print_variables(double tau,
   double delta_p_ncdm = 0.0;
   double factor = 0.0;
   double q,q2,epsilon;
+  /* MAVAN Model start */
+  double Meff;
+  /* MAVAN Model end */
   double p_prime_over_rho_ncdm = 0.0;
+  double rho_prime_over_rho_ncdm = 0.0;
   double delta_ncdm_syn = 0.0;
+  double trace_ncdm_tot = 0.0;
   /** - ncdm sector ends */
   double phi=0.,psi=0.,alpha=0.;
   double delta_temp=0., delta_chi=0.;
-  double a_prime_over_a=0.;  /* (a'/a) */
+
   double a,a2,H;
   int idx,index_q, storeidx;
   double *dataptr;
-    /* MAVAN Model start */
-  double Meff;
-  double phi_scf;
-  /* MAVAN Model end */
+
 
   /** - rename structure fields (just to avoid heavy notations) */
 
@@ -8230,7 +8353,7 @@ int perturbations_print_variables(double tau,
   a = pvecback[pba->index_bg_a];
   a2 = a*a;
   H = pvecback[pba->index_bg_H];
-  a_prime_over_a = pvecback[pba->index_bg_a] * pvecback[pba->index_bg_H]; /* (a'/a)=aH */
+
   if (pba->has_ncdm == _TRUE_){
     class_alloc(delta_ncdm, sizeof(double)*pba->N_ncdm,error_message);
     class_alloc(theta_ncdm, sizeof(double)*pba->N_ncdm,error_message);
@@ -8356,8 +8479,6 @@ int perturbations_print_variables(double tau,
     }
 
     if (pba->has_ncdm == _TRUE_) {
-      
-
       /** - --> Get delta, deltaP/rho, theta, shear and store in array */
       idx = ppw->pv->index_pt_psi0_ncdm1;
       if (ppw->approx[ppw->index_ap_ncdmfa] == (int)ncdmfa_on){
@@ -8379,9 +8500,16 @@ int perturbations_print_variables(double tau,
       else{
         // We must integrate to find perturbations:
         for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++){
-          /* MAVAN Model start */
-          phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-          Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
+          class_call(perturbations_mavan_effective_mass(
+                                                             pba,
+                                                             n_ncdm,
+                                                             (pba->has_scf == _TRUE_)
+                                                             ? ppw->pvecback[pba->index_bg_phi_scf]
+                                                             : 0.0,
+                                                             &Meff,
+                                                             error_message),
+                     error_message,
+                     error_message);
           rho_delta_ncdm = 0.0;
           rho_plus_p_theta_ncdm = 0.0;
           rho_plus_p_shear_ncdm = 0.0;
@@ -8393,13 +8521,27 @@ int perturbations_print_variables(double tau,
             q = pba->q_ncdm[n_ncdm][index_q];
             q2 = q*q;
             epsilon = sqrt(q2+Meff*Meff*a2);
-           /* MAVAN Model end */
-           /* MAVAN Model start - eq 3.1 and 3.2 of https://arxiv.org/pdf/2311.01803. */ 
-            rho_delta_ncdm += q2*pba->w_ncdm[n_ncdm][index_q]*(epsilon*y[idx] + pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]*(Meff*Meff*a2/epsilon));
+
+            /* Brookfield Eq. (27), including delta m/m=beta*delta-phi. */
+            rho_delta_ncdm += q2*pba->w_ncdm[n_ncdm][index_q]
+              *(epsilon*y[idx]
+                +((pba->beta_ncdm != 0.0)
+                  ? pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]
+                  *Meff*Meff*a2/epsilon
+                  : 0.0));
+
             rho_plus_p_theta_ncdm += q2*q*pba->w_ncdm[n_ncdm][index_q]*y[idx+1];
             rho_plus_p_shear_ncdm += q2*q2/epsilon*pba->w_ncdm[n_ncdm][index_q]*y[idx+2];
-            delta_p_ncdm += q2*q2/epsilon*pba->w_ncdm[n_ncdm][index_q]*(y[idx] - pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]*(Meff*Meff*a2/(epsilon*epsilon)));
-          /* MAVAN Model end */
+
+            /* Pressure equation following Brookfield Eq. (28), with the
+               negative delta-mass term. */
+            delta_p_ncdm += q2*pba->w_ncdm[n_ncdm][index_q]
+              *(q2/epsilon)
+              *(y[idx]
+                -((pba->beta_ncdm != 0.0)
+                  ? pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]
+                  *Meff*Meff*a2/(epsilon*epsilon)
+                  : 0.0));
             //Jump to next momentum bin:
             idx+=(ppw->pv->l_max_ncdm[n_ncdm]+1);
           }
@@ -8500,19 +8642,42 @@ int perturbations_print_variables(double tau,
           w_ncdm = p_ncdm_bg/rho_ncdm_bg;
 
           pseudo_p_ncdm = pvecback[pba->index_bg_pseudo_p_ncdm1+n_ncdm];
-          /* The following equation for p'/rho can be infered from the
-             energy conservation equation combined with eq. (3.3) of
-             arxiv[1104.2935] */
-          p_prime_over_rho_ncdm = -a*H*w_ncdm*(5.-pseudo_p_ncdm/p_ncdm_bg);
+          if (pba->beta_ncdm == 0.0) {
+            /* Exact standard-CLASS background derivatives. */
+            rho_prime_over_rho_ncdm = -3.0*a*H*(1.0+w_ncdm);
+            p_prime_over_rho_ncdm =
+              -a*H*w_ncdm*(5.0-pseudo_p_ncdm/p_ncdm_bg);
+          }
+          else {
+            /* Coupled background equations, in conformal time:
+
+                 rho_nu'/rho_nu = -3 Hc(1+w_nu)
+                                    +beta phi'(1-3w_nu),
+
+                 p_nu'/rho_nu = Hc(pseudo_p_nu/rho_nu-5w_nu)
+                                  -beta phi'(w_nu-pseudo_p_nu/rho_nu).
+
+               These derivatives are required by the synchronous-to-
+               Newtonian gauge transformation of delta-rho and delta-p. */
+            rho_prime_over_rho_ncdm =
+              -3.0*a*H*(1.0+w_ncdm)
+              +pba->beta_ncdm*pvecback[pba->index_bg_phi_prime_scf]
+              *(1.0-3.0*w_ncdm);
+
+            p_prime_over_rho_ncdm =
+              a*H*(pseudo_p_ncdm/rho_ncdm_bg-5.0*w_ncdm)
+              -pba->beta_ncdm*pvecback[pba->index_bg_phi_prime_scf]
+              *(w_ncdm-pseudo_p_ncdm/rho_ncdm_bg);
+          }
 
           /* store delta[Syn] before doing the gauge transformation */
           delta_ncdm_syn = delta_ncdm[n_ncdm];
 
           /* gauge transformation for delta, theta and delta_p_over_delta_rho (shear is invariant) */
-          delta_ncdm[n_ncdm] -= 3.*a*H*(1+w_ncdm)*alpha;
+          delta_ncdm[n_ncdm] += rho_prime_over_rho_ncdm*alpha;
           theta_ncdm[n_ncdm] += k*k*alpha;
           delta_p_over_delta_rho_ncdm[n_ncdm] = (delta_p_over_delta_rho_ncdm[n_ncdm]*delta_ncdm_syn + p_prime_over_rho_ncdm*alpha)
-            /(delta_ncdm_syn - 3*a*H*(1.+w_ncdm)*alpha);
+            /(delta_ncdm_syn + rho_prime_over_rho_ncdm*alpha);
         }
       }
 
@@ -8522,7 +8687,29 @@ int perturbations_print_variables(double tau,
       }
 
       if (pba->has_scf == _TRUE_) {
-        delta_scf += alpha*(-3.0*H*(1.0+pvecback[pba->index_bg_p_scf]/pvecback[pba->index_bg_rho_scf]));
+        if (pba->beta_ncdm == 0.0) {
+          /* Preserve the native CLASS output transformation exactly. */
+          delta_scf += alpha*(-3.0*H*(1.0+pvecback[pba->index_bg_p_scf]
+                                      /pvecback[pba->index_bg_rho_scf]));
+        }
+        else {
+          /* Scalar continuity equation in conformal time:
+
+               rho_phi' = -3 Hc(rho_phi+p_phi)
+                          -beta phi' Sum_n(rho_nu-3p_nu).
+
+             Hence delta_phi_density transforms with rho_phi'/rho_phi. */
+          trace_ncdm_tot = 0.0;
+          for (n_ncdm=0; n_ncdm<pba->N_ncdm; n_ncdm++) {
+            trace_ncdm_tot +=
+              pvecback[pba->index_bg_trace_p_ncdm1+n_ncdm];
+          }
+          delta_scf += alpha*
+            (-3.0*a*H*(1.0+pvecback[pba->index_bg_p_scf]
+                        /pvecback[pba->index_bg_rho_scf])
+             -pba->beta_ncdm*pvecback[pba->index_bg_phi_prime_scf]
+             *trace_ncdm_tot/pvecback[pba->index_bg_rho_scf]);
+        }
         theta_scf += k*k*alpha;
       }
 
@@ -8677,14 +8864,20 @@ int perturbations_print_variables(double tau,
 
     /* Non-cold Dark Matter */
     if (ppt->evolve_tensor_ncdm == _TRUE_) {
-      
-    
+
       idx = ppw->pv->index_pt_psi0_ncdm1;
 
       for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++){
-        /* MAVAN Model start */
-        phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-        Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
+        class_call(perturbations_mavan_effective_mass(
+                                                           pba,
+                                                           n_ncdm,
+                                                           (pba->has_scf == _TRUE_)
+                                                           ? ppw->pvecback[pba->index_bg_phi_scf]
+                                                           : 0.0,
+                                                           &Meff,
+                                                           error_message),
+                   error_message,
+                   error_message);
         rho_delta_ncdm = 0.0;
         rho_plus_p_theta_ncdm = 0.0;
         rho_plus_p_shear_ncdm = 0.0;
@@ -8696,13 +8889,15 @@ int perturbations_print_variables(double tau,
           q = pba->q_ncdm[n_ncdm][index_q];
           q2 = q*q;
           epsilon = sqrt(q2+Meff*Meff*a2);
-          /* MAVAN Model end */
-          /* MAVAN Model start - eq 3.1 and 3.2 of https://arxiv.org/pdf/2311.01803. */ 
-          rho_delta_ncdm += q2*pba->w_ncdm[n_ncdm][index_q]*(epsilon*y[idx] + pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]*(Meff*Meff*a2/epsilon));
+
+          /* Tensor modes contain no scalar delta-phi.  Only the background
+             varying mass enters their ncdm momentum integrals. */
+          rho_delta_ncdm +=
+            q2*pba->w_ncdm[n_ncdm][index_q]*epsilon*y[idx];
           rho_plus_p_theta_ncdm += q2*q*pba->w_ncdm[n_ncdm][index_q]*y[idx+1];
           rho_plus_p_shear_ncdm += q2*q2/epsilon*pba->w_ncdm[n_ncdm][index_q]*y[idx+2];
-          delta_p_ncdm += q2*q2/epsilon*pba->w_ncdm[n_ncdm][index_q]*(y[idx] - pba->beta_ncdm*y[ppw->pv->index_pt_phi_scf]*(Meff*Meff*a2/(epsilon*epsilon)));
-           /* MAVAN Model end */ 
+          delta_p_ncdm +=
+            q2*pba->w_ncdm[n_ncdm][index_q]*(q2/epsilon)*y[idx];
           //Jump to next momentum bin:
           idx+=(ppw->pv->l_max_ncdm[n_ncdm]+1);
         }
@@ -8822,21 +9017,16 @@ int perturbations_derivs(double tau,
   double R_idm_b = 0., dR_idm_b = 0., S_idm_b = 0.; /* these are just going to be used as a short hand notation */
 
   /* for use with non-cold dark matter (ncdm): */
-    /* MAVAN Model start */
   int index_q,n_ncdm,idx;
   double q,epsilon,dlnf0_dlnq,qk_div_epsilon;
-  double rho_ncdm_bg,p_ncdm_bg,pseudo_p_ncdm,w_ncdm,ca2_ncdm,cg2_ncdm,H,ceff2_ncdm=0.,cvis2_ncdm=0.;
+  /* MAVAN Model start */
   double Meff;
-
-  double phi_scf;
-  double delta_p_ncdm=0.;
-  double delta_rho_ncdm=0.;
-  double rho_delta_ncdm=0.;
-  double p_delta_ncdm= 0.;
-  double rho_plus_p_theta_ncdm=0.;
-  double rho_plus_p_shear_ncdm=0.;
-  double rho_plus_p_ncdm,q2,factor;
-    /* MAVAN Model end */
+  /* MAVAN Model end */
+  double rho_ncdm_bg,p_ncdm_bg,pseudo_p_ncdm,w_ncdm,ca2_ncdm,ceff2_ncdm=0.,cvis2_ncdm=0.;
+  double coupling_rate_ncdm=0.;
+  double rho_prime_over_rho_ncdm=0.;
+  double p_prime_over_rho_ncdm=0.;
+  double w_prime_ncdm=0.;
 
   /* for use with curvature */
   double cotKgen, sqrt_absK;
@@ -8845,7 +9035,6 @@ int perturbations_derivs(double tau,
   /* for use with dcdm and dr */
   double f_dr, fprime_dr;
 
- 
   /** - rename the fields of the input structure (just to avoid heavy notations) */
 
   pppaw = (struct perturbations_parameters_and_workspace *)parameters_and_workspace;
@@ -9446,69 +9635,48 @@ int perturbations_derivs(double tau,
     }
 
     /** - ---> scalar field (scf) */
-             /* MAVAN Model start - Here we compute delta_ncdm and delta_p_ncdm inside int perturbations_derivs( to put in the klein gordon equation, eq 3.12 of https://arxiv.org/pdf/2311.01803  */ 
-    if (pba->has_scf == _TRUE_ && pba->has_ncdm == _TRUE_) {
-    
-      idx = ppw->pv->index_pt_psi0_ncdm1;
-      if (ppw->approx[ppw->index_ap_ncdmfa] == (int)ncdmfa_on){
-          // The perturbations are evolved integrated:
-        for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++){
-          rho_ncdm_bg = ppw->pvecback[pba->index_bg_rho_ncdm1+n_ncdm];
-          p_ncdm_bg = ppw->pvecback[pba->index_bg_p_ncdm1+n_ncdm];
-          pseudo_p_ncdm = ppw->pvecback[pba->index_bg_pseudo_p_ncdm1+n_ncdm];
-          w_ncdm = p_ncdm_bg/rho_ncdm_bg;
-          cg2_ncdm = w_ncdm*(1.0-1.0/(3.0+3.0*w_ncdm)*(3.0*w_ncdm-2.0+pseudo_p_ncdm/p_ncdm_bg));
+    /* MAVAN Model start */
+    if (pba->has_scf == _TRUE_) {
 
-             
-          delta_rho_ncdm += rho_ncdm_bg*y[idx];
-          delta_p_ncdm += cg2_ncdm*rho_ncdm_bg*y[idx];
-
-
-          idx += ppw->pv->l_max_ncdm[n_ncdm]+1;
-        }
-      }
-      else{
-        // We must integrate to find perturbations:
-        for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++){
-          phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-          Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
-          rho_delta_ncdm = 0.0;
-          p_delta_ncdm = 0.0;
-          rho_plus_p_theta_ncdm = 0.0;
-          rho_plus_p_shear_ncdm = 0.0;
-          factor = pba->factor_ncdm[n_ncdm]/pow(a,4);
-
-          for (index_q=0; index_q < ppw->pv->q_size_ncdm[n_ncdm]; index_q ++) {
-            q = pba->q_ncdm[n_ncdm][index_q];
-            q2 = q*q;
-            epsilon = sqrt(q2+Meff*Meff*a2);
-            rho_delta_ncdm += q2*pba->w_ncdm[n_ncdm][index_q]*(epsilon*y[idx] + pba->beta_ncdm*y[pv->index_pt_phi_scf]*(Meff*Meff*a2/epsilon));
-            p_delta_ncdm += q2*q2/epsilon*pba->w_ncdm[n_ncdm][index_q]*(y[idx] - pba->beta_ncdm*y[pv->index_pt_phi_scf]*(Meff*Meff*a2/(epsilon*epsilon)));
-
-              //Jump to next momentum bin:
-            idx+=(ppw->pv->l_max_ncdm[n_ncdm]+1);
-          }
-
-          rho_delta_ncdm *= factor;
-          p_delta_ncdm *= factor/3.;
-          delta_rho_ncdm += rho_delta_ncdm;
-          delta_p_ncdm   += p_delta_ncdm;
-
-        } 
-      }
-      
       /** - ----> field value */
 
       dy[pv->index_pt_phi_scf] = y[pv->index_pt_phi_prime_scf];
 
       /** - ----> Klein Gordon equation */
 
+      /* Brookfield Eq. (29), with dots interpreted as d/dtau:
 
-      dy[pv->index_pt_phi_prime_scf] =  - 2.*a_prime_over_a*y[pv->index_pt_phi_prime_scf]
-         - metric_continuity*pvecback[pba->index_bg_phi_prime_scf] //  metric_continuity = h'/2
-         - (k2 + a2*pvecback[pba->index_bg_ddV_scf])*y[pv->index_pt_phi_scf] -  a2*pba->beta_ncdm *(delta_rho_ncdm  - 3.0*delta_p_ncdm); //checked
+           delta-phi'' + 2 Hc delta-phi'
+           +(k^2+a^2 V_,phi-phi) delta-phi
+           +(h'/2) phi'
+           = -a^2 beta (delta-rho_nu-3 delta-p_nu).
 
-    } 
+         In CLASS, metric_continuity=h'/2 in synchronous gauge. */
+      dy[pv->index_pt_phi_prime_scf] =
+        /* Hubble friction: -2 Hc delta-phi'. */
+        -2.0*a_prime_over_a*y[pv->index_pt_phi_prime_scf]
+        /* Synchronous metric source: -(h'/2) phi'. */
+        -metric_continuity*pvecback[pba->index_bg_phi_prime_scf]
+        /* Gradient plus effective-potential curvature. */
+        -(k2+a2*pvecback[pba->index_bg_ddV_scf])
+        *y[pv->index_pt_phi_scf];
+
+      if (pba->beta_ncdm != 0.0) {
+        /* CLASS densities are (8 pi G/3) times physical densities, whereas
+           the dimensionless-field KG equation contains 8 pi G.  Therefore
+           the source in CLASS units is
+
+             -3 a^2 beta (delta-rho_nu-3 delta-p_nu)_CLASS.
+
+           The density and pressure integrals already include their
+           beta*delta-phi
+           contributions, so no separate beta^2 term is added here. */
+        dy[pv->index_pt_phi_prime_scf] -=
+          3.0*a2*pba->beta_ncdm
+          *(ppw->rho_delta_ncdm-3.0*ppw->delta_p_ncdm);
+      }
+
+    }
     /* MAVAN Model end */
     /** - ---> ultra-relativistic neutrino/relics (ur) */
 
@@ -9597,8 +9765,7 @@ int perturbations_derivs(double tau,
     /** - ---> non-cold dark matter (ncdm): massive neutrinos, WDM, etc. */
     //TBC: curvature in all ncdm
     if (pba->has_ncdm == _TRUE_) {
-      
-    
+
       idx = pv->index_pt_psi0_ncdm1;
 
       /** - ----> first case: use a fluid approximation (ncdmfa) */
@@ -9610,18 +9777,12 @@ int perturbations_derivs(double tau,
         for (n_ncdm=0; n_ncdm<pv->N_ncdm; n_ncdm++) {
 
           /** - -----> define intermediate quantitites */
-          
+
           rho_ncdm_bg = pvecback[pba->index_bg_rho_ncdm1+n_ncdm]; /* background density */
           p_ncdm_bg = pvecback[pba->index_bg_p_ncdm1+n_ncdm]; /* background pressure */
           pseudo_p_ncdm = pvecback[pba->index_bg_pseudo_p_ncdm1+n_ncdm]; /* pseudo-pressure (see CLASS IV paper) */
           w_ncdm = p_ncdm_bg/rho_ncdm_bg; /* equation of state parameter */
           ca2_ncdm = w_ncdm/3.0/(1.0+w_ncdm)*(5.0-pseudo_p_ncdm/p_ncdm_bg); /* adiabatic sound speed */
-          /* MAVAN Model start */
-          
-          double rho_prime_over_rho = -3.0 * a_prime_over_a * (1.0 + w_ncdm) + pba->beta_ncdm * ppw->pvecback[pba->index_bg_phi_prime_scf] * (1.0 - 3.0 * w_ncdm);
-          double w_prime = (ca2_ncdm - w_ncdm)*rho_prime_over_rho;
-          
-          /* MAVAN Model end */          
 
           /* c_eff is (delta p / delta rho) in the gauge under
              consideration (not in the gauge comoving with the
@@ -9643,22 +9804,35 @@ int perturbations_derivs(double tau,
             cvis2_ncdm = 3.*w_ncdm*ca2_ncdm;
           }
 
-          /* MAVAN Model start Eq 3.8 of  https://arxiv.org/pdf/2311.01803 */
-          /** - -----> exact continuity equation */
+          /** - -----> continuity equation: Brookfield Eq. (31) */
 
-          dy[idx] = 3.0*(a_prime_over_a + pba->beta_ncdm*ppw->pvecback[pba->index_bg_phi_prime_scf])*(w_ncdm - ceff2_ncdm)*y[idx]  - (1.0 + w_ncdm)*(y[idx+1] + metric_continuity) + 
-            pba->beta_ncdm*(1 - 3*w_ncdm)*y[pv->index_pt_phi_prime_scf];
-          /* MAVAN Model end */
-          
-          
-          /* MAVAN Model start Eq 3.9 of  https://arxiv.org/pdf/2311.01803 ( w_prime is calculated from w = p/rho, w' = p'/rho - w rho'/p,  ca2= p'/rho' so we have w_prime = (ca2 - w)rho'/rho and rho' comes from eq 2.6 of the same paper.) */
-          /** - -----> exact euler equation */     
-            
-          dy[idx+1] = -a_prime_over_a*(1.0 - 3.0*w_ncdm)*y[idx+1] - w_prime/(1.0 + w_ncdm)*y[idx+1]  + ceff2_ncdm/(1.0+w_ncdm)*k2*y[idx] 
-                       + pba->beta_ncdm*(1.0 - 3.0*w_ncdm)/(1.0 + w_ncdm)*k2*y[pv->index_pt_phi_scf] 
-                       - pba->beta_ncdm*(1.0-3.0*w_ncdm)*ppw->pvecback[pba->index_bg_phi_prime_scf]*y[idx+1] - k2*y[idx+2] + metric_euler;
-                       
-                    /* MAVAN Model end */   
+          /* Begin with the exact standard-CLASS expression.  This preserves
+             the uncoupled calculation and avoids scalar-field indices when
+             beta_ncdm=0.  Here y[idx]=delta_nu, y[idx+1]=theta_nu and
+             metric_continuity=h'/2 in synchronous gauge. */
+          dy[idx] =-(1.0+w_ncdm)*(y[idx+1]+metric_continuity)
+  		-3.0*a_prime_over_a*(ceff2_ncdm-w_ncdm)*y[idx];
+
+	  if (pba->beta_ncdm != 0.0) {
+
+  	    dy[idx] += -3.0*pba->beta_ncdm*pvecback[pba->index_bg_phi_prime_scf]*(ceff2_ncdm-w_ncdm)
+  	               *y[idx]+pba->beta_ncdm*(1.0-3.0*w_ncdm)*y[pv->index_pt_phi_prime_scf];
+
+          }
+
+          /** - -----> Euler equation: Brookfield Eq. (32) */
+
+          /* Terms common to the coupled and uncoupled equations. */
+          dy[idx+1] =-a_prime_over_a*(1.0-3.0*ca2_ncdm)*y[idx+1]
+  		      +ceff2_ncdm/(1.0+w_ncdm)*k2*y[idx]
+                      -k2*y[idx+2]+metric_euler;
+
+          if (pba->beta_ncdm != 0.0) {
+            dy[idx+1] +=-pba->beta_ncdm*pvecback[pba->index_bg_phi_prime_scf]
+                        *(1.0-3.0*ca2_ncdm)*y[idx+1]+pba->beta_ncdm*(1.0-3.0*w_ncdm)
+                        /(1.0+w_ncdm)*k2*y[pv->index_pt_phi_scf];
+          }
+
           /** - -----> different ansatz for approximate shear derivative */
 
           if (ppr->ncdm_fluid_approximation == ncdmfa_mb) {
@@ -9695,33 +9869,62 @@ int perturbations_derivs(double tau,
         /** - -----> loop over species */
 
         for (n_ncdm=0; n_ncdm<pv->N_ncdm; n_ncdm++) {
-        /* MAVAN Model start */
-          phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-          Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
+          class_call(perturbations_mavan_effective_mass(
+                                                             pba,
+                                                             n_ncdm,
+                                                             (pba->has_scf == _TRUE_)
+                                                             ? ppw->pvecback[pba->index_bg_phi_scf]
+                                                             : 0.0,
+                                                             &Meff,
+                                                             error_message),
+                     error_message,
+                     error_message);
           /** - -----> loop over momentum */
 
           for (index_q=0; index_q < pv->q_size_ncdm[n_ncdm]; index_q++) {
 
-              /** - -----> define intermediate quantities */
+            /** - -----> define intermediate quantities */
 
             dlnf0_dlnq = pba->dlnf0_dlnq_ncdm[n_ncdm][index_q];
             q = pba->q_ncdm[n_ncdm][index_q];
             epsilon = sqrt(q*q+a2*Meff*Meff);
-            
             qk_div_epsilon = k*q/epsilon;
 
-            /** - -----> ncdm density for given momentum bin */
+            /** - -----> ncdm monopole, unchanged by the interaction */
 
             dy[idx] = -qk_div_epsilon*y[idx+1]+metric_continuity*dlnf0_dlnq/3.;
 
-            /** - -----> ncdm velocity for given momentum bin */
+            /** - -----> ncdm dipole: Brookfield erratum Eq. (41) */
 
-            dy[idx+1] = qk_div_epsilon/3.0*(y[idx] - 2*s_l[2]*y[idx+2])
-              - (qk_div_epsilon/3.0)*(a2*Meff*Meff/(q*q))
-               *(pba->beta_ncdm)*dlnf0_dlnq*y[pv->index_pt_phi_scf];
-               
-               /* MAVAN Model end */
-            /** - -----> ncdm shear for given momentum bin */
+            /* Preserve the complete native hierarchy first, including the
+               Newtonian metric force.  The latter vanishes in the supported
+               synchronous MaVaN calculation but is required at beta=0. */
+            dy[idx+1] =
+              qk_div_epsilon/3.0
+              *(y[idx]-2.0*s_l[2]*y[idx+2])
+              -epsilon*metric_euler/(3.0*q*k)*dlnf0_dlnq;
+
+            if (pba->beta_ncdm != 0.0) {
+              class_test(q <= 0.0,
+                         error_message,
+                         "MaVaN ncdm hierarchy requires q>0, got q=%e",
+                         q);
+
+              /* Fifth-force term in Brookfield erratum Eq. (41):
+
+                   -(q k/(3 epsilon)) (a^2 m_nu^2/q^2)
+                     beta delta-phi dln(f0)/dln(q).
+
+                 The algebraically equivalent ordering below uses
+                 (dln f0/dln q)/q, which remains finite on the positive
+                 CLASS quadrature grid and avoids forming 1/q^2 first. */
+              dy[idx+1] -=
+                k/3.0*(a2*Meff*Meff/epsilon)
+                *pba->beta_ncdm*(dlnf0_dlnq/q)
+                *y[pv->index_pt_phi_scf];
+            }
+
+            /** - -----> ncdm quadrupole, unchanged by the interaction */
 
             dy[idx+2] = qk_div_epsilon/5.0*(2*s_l[2]*y[idx+1]-3.*s_l[3]*y[idx+3])
               -s_l[2]*metric_shear*2./15.*dlnf0_dlnq;
@@ -10018,16 +10221,22 @@ int perturbations_derivs(double tau,
     /** - --> non-cold dark matter (ncdm): massive neutrinos, WDM, etc. */
     //TBC: curvature in all ncdm
     if (ppt->evolve_tensor_ncdm == _TRUE_) {
-      
- 
+
       idx = pv->index_pt_psi0_ncdm1;
 
       /** - ---> loop over species */
 
       for (n_ncdm=0; n_ncdm<pv->N_ncdm; n_ncdm++) {
-      /* MAVAN Model start */
-        phi_scf = ppw->pvecback[pba->index_bg_phi_scf];
-        Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
+        class_call(perturbations_mavan_effective_mass(
+                                                           pba,
+                                                           n_ncdm,
+                                                           (pba->has_scf == _TRUE_)
+                                                           ? ppw->pvecback[pba->index_bg_phi_scf]
+                                                           : 0.0,
+                                                           &Meff,
+                                                           error_message),
+                   error_message,
+                   error_message);
         /** - ----> loop over momentum */
 
         for (index_q=0; index_q < pv->q_size_ncdm[n_ncdm]; index_q++) {
@@ -10037,9 +10246,8 @@ int perturbations_derivs(double tau,
           dlnf0_dlnq = pba->dlnf0_dlnq_ncdm[n_ncdm][index_q];
           q = pba->q_ncdm[n_ncdm][index_q];
           epsilon = sqrt(q*q+a2*Meff*Meff);
-          /* MAVAN Model end */
           qk_div_epsilon = k*q/epsilon;
-        
+
           /** - ----> ncdm density for given momentum bin */
 
           dy[idx] = -qk_div_epsilon*y[idx+1]-0.25*_SQRT6_*y[pv->index_pt_gwdot]*dlnf0_dlnq;

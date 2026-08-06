@@ -568,10 +568,11 @@ struct perturbations_workspace
   struct perturbations_vector * pv; /**< pointer to vector of integrated
                                        perturbations and their
                                        time-derivatives */
-
+  /**< MAVAN model start    */                                 
+  double rho_delta_ncdm;  /**< total NCDM density perturbation delta_rho_ncdm */
+  double delta_p_ncdm;    /**< total NCDM pressure perturbation delta_p_ncdm */
+    /**< MAVAN model end    */  
   double delta_rho;		    /**< total density perturbation (gives delta Too) */
-
-
   double rho_plus_p_theta;	/**< total (rho+p)*theta perturbation (gives delta Toi) */
   double rho_plus_p_shear;	/**< total (rho+p)*shear (gives delta Tij) */
   double delta_p;		    /**< total pressure perturbation (gives Tii) */

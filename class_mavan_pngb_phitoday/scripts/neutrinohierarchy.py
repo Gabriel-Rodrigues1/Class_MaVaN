@@ -58,7 +58,7 @@ commonsettings = {'Neff':3.044, # Let's fix Neff to the usual value here
                   # The next line should be uncommented for higher precision (but significantly slower running)
                   'ncdm_fluid_approximation':3,
                   # You may uncomment this line to get more info on the ncdm sector from Class:
-                  'background_verbose':1
+                  #'background_verbose':1
                  }
 
 # array of k values in 1/Mpc

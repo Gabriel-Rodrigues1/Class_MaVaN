@@ -2362,9 +2362,7 @@ int input_read_parameters_species(struct file_content * pfc,
   int fileentries;
   int N_ncdm=0, n, entries_read;
   double rho_ncdm;
-  /* MAVAN Model start */
   double scf_lambda;
-  /* MAVAN Model end */
   double fnu_factor;
   double Omega_tot;
   double sigma_B; // Stefan-Boltzmann constant
@@ -3371,12 +3369,10 @@ int input_read_parameters_species(struct file_content * pfc,
     /* Read */
     class_read_double("scf_shooting_parameter",pba->scf_parameters[pba->scf_tuning_index]);
     /* Complete set of parameters */
-    /* MAVAN Model start */
     scf_lambda = pba->scf_parameters[0];
     if ((fabs(scf_lambda) < 3.)&&(pba->background_verbose>1)){
       printf("'scf_lambda' = %e < 3 won't be tracking (for exp quint) unless overwritten by tuning function.",scf_lambda);
     }
-    /* MAVAN Model end */
   }
 
   return _SUCCESS_;

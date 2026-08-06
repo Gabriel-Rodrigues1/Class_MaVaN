@@ -115,6 +115,58 @@
 #include "background.h"
 
 /**
+ * Return the dimensionless ncdm mass used in the momentum integrals.
+ *
+ * Physical model (Brookfield et al., Eqs. 10 and 13):
+ *
+ *   m_nu(phi) = m_nu,0 exp[beta (phi-phi_0)] .
+ *
+ * In CLASS, M_ncdm[n] is m_nu,0/T_ncdm,0, i.e. the PRESENT-DAY
+ * dimensionless mass.  Therefore phi_0 must be the self-consistent field
+ * value at a=1.  Keeping this formula in one helper prevents the background
+ * and perturbation modules from silently adopting different mass conventions.
+ */
+static int background_mavan_effective_mass(
+                                            struct background *pba,
+                                            int n_ncdm,
+                                            double phi_bg,
+                                            double *Meff
+                                            ) {
+  double exponent;
+
+  /* beta=0 must reproduce the original CLASS mass exactly and must not
+     require a scalar-field index or a value of phi_today_scf. */
+  if (pba->beta_ncdm == 0.0) {
+    *Meff = pba->M_ncdm[n_ncdm];
+    return _SUCCESS_;
+  }
+
+  /* This is Brookfield Eq. (13), rewritten in present-mass form. */
+  exponent = pba->beta_ncdm*(phi_bg-pba->phi_today_scf);
+
+  /* exp(x) overflows in IEEE double precision near x=709.  A slightly
+     tighter bound gives a controlled CLASS error instead of NaN/Inf. */
+  class_test(!isfinite(exponent) || exponent > 700.0 || exponent < -700.0,
+             pba->error_message,
+             "MaVaN exponent beta*(phi-phi_0)=%e is outside the safe range",
+             exponent);
+
+  /* CLASS momentum routines expect M=m/T_ncdm,0, so the exponential
+     multiplies M_ncdm itself; no factor of a belongs here. */
+  *Meff = pba->M_ncdm[n_ncdm]*exp(exponent);
+
+  /* A physical mass is non-negative and must remain finite.  M=0 is kept
+     legal because a formally massless ncdm species has a vanishing trace. */
+  class_test(!isfinite(*Meff) || *Meff < 0.0,
+             pba->error_message,
+             "non-finite or negative MaVaN effective mass M_eff[%d]=%e",
+             n_ncdm,
+             *Meff);
+
+  return _SUCCESS_;
+}
+
+/**
  * Background quantities at given redshift z.
  *
  * Evaluates all background quantities at a given value of
@@ -392,6 +444,16 @@ int background_functions(
   double rho_m;
   /* background ncdm quantities */
   double rho_ncdm,p_ncdm,pseudo_p_ncdm;
+  /* MAVAN Model start */
+  double Meff;
+  double trace_p;
+  /* Sum T_nu=rho_nu-3p_nu over all coupled ncdm species.  It sources
+     the scalar equation and the scalar pressure derivative. */
+  double trace_ncdm_tot=0.;
+  /* Sum p_nu-pseudo_p_nu.  This is the mass-dependent moment entering
+     p_nu', and it is not equal to (rho_nu-3p_nu)/3. */
+  double p_minus_pseudo_ncdm_tot=0.;
+  /* MAVAN Model end */
   /* index for n_ncdm species */
   int n_ncdm;
   /* fluid's time-dependent equation of state parameter */
@@ -404,13 +466,7 @@ int background_functions(
      p_prime = a_prime_over_a * dp_dloga = a_prime_over_a * Sum [ (w_prime/a_prime_over_a -3(1+w)w)rho].
      Note: The scalar field contribution must be added in the end, as an exception!*/
   double dp_dloga;
-/* MAVAN Model start */
-  double Meff;
-  double phi_scf;
-  double trace_p;
- /* MAVAN Model end */
- /* scalar field quantities */
- 
+
   /** - initialize local variables */
   rho_tot = 0.;
   p_tot = 0.;
@@ -477,42 +533,58 @@ int background_functions(
 
   /* Scalar field */
   if (pba->has_scf == _TRUE_) {
+    /* Homogeneous dimensionless field phi=phi_phys/M_pl. */
     phi = pvecback_B[pba->index_bi_phi_scf];
+    /* Conformal-time derivative phi'=dphi/dtau, not dphi/dt. */
     phi_prime = pvecback_B[pba->index_bi_phi_prime_scf];
-    pvecback[pba->index_bg_phi_scf] = phi; // value of the scalar field phi
-    pvecback[pba->index_bg_phi_prime_scf] = phi_prime; // value of the scalar field phi derivative wrt conformal time
-    pvecback[pba->index_bg_V_scf] = V_scf(pba,phi); //V_scf(pba,phi); //write here potential as function of phi
-    pvecback[pba->index_bg_dV_scf] = dV_scf(pba,phi); // dV_scf(pba,phi); //potential' as function of phi
-    pvecback[pba->index_bg_ddV_scf] = ddV_scf(pba,phi); // ddV_scf(pba,phi); //potential'' as function of phi
-    pvecback[pba->index_bg_rho_scf] = (phi_prime*phi_prime/(2*a*a) + V_scf(pba,phi))/3.; // energy of the scalar field. The field units are set automatically by setting the initial conditions
-    pvecback[pba->index_bg_p_scf] =(phi_prime*phi_prime/(2*a*a) - V_scf(pba,phi))/3.; // pressure of the scalar field
+    /* Export phi and phi' to the normal background vector. */
+    pvecback[pba->index_bg_phi_scf] = phi;
+    pvecback[pba->index_bg_phi_prime_scf] = phi_prime;
+    /* Export V, V_,phi and V_,phiphi for the background and perturbations. */
+    pvecback[pba->index_bg_V_scf] = V_scf(pba,phi);
+    pvecback[pba->index_bg_dV_scf] = dV_scf(pba,phi);
+    pvecback[pba->index_bg_ddV_scf] = ddV_scf(pba,phi);
+    /* Canonical scalar density in CLASS units:
+         rho_phi_CLASS = [phi'^2/(2a^2)+V]/3. */
+    pvecback[pba->index_bg_rho_scf] =
+      (phi_prime*phi_prime/(2.*a*a)+pvecback[pba->index_bg_V_scf])/3.;
+    /* Canonical scalar pressure in CLASS units:
+         p_phi_CLASS = [phi'^2/(2a^2)-V]/3. */
+    pvecback[pba->index_bg_p_scf] =
+      (phi_prime*phi_prime/(2.*a*a)-pvecback[pba->index_bg_V_scf])/3.;
     rho_tot += pvecback[pba->index_bg_rho_scf];
     p_tot += pvecback[pba->index_bg_p_scf];
     dp_dloga += 0.0; /** <-- This depends on a_prime_over_a, so we cannot add it now! */
-    //divide relativistic & nonrelativistic (not very meaningful for oscillatory models)
-    
-  /* MAVAN Model start (Removed rho_r and rho_m for this scalar field model.)*/
-    /* rho_r += 3.*pvecback[pba->index_bg_p_scf]; */ //field pressure contributes radiation
-    /* rho_m += pvecback[pba->index_bg_rho_scf] - 3.* pvecback[pba->index_bg_p_scf]; */ //the rest contributes matter
-    /* printf(" a= %e, Omega_scf = %f, \n ",a, pvecback[pba->index_bg_rho_scf]/rho_tot );  */
-  /* MAVAN Model end */
+    /* Do not apply CLASS's legacy effective split
+
+         rho_r,eff += 3 p_phi,
+         rho_m,eff += rho_phi-3 p_phi
+
+       to a dark-energy scalar field.  For w_phi approximately -1 it would add
+       negative radiation and about 4*rho_phi to Omega_m.  In the MaVaN model
+       rho_phi is a separate dark-energy component, as in Eq. (2.1), while it
+       remains fully included in rho_tot, p_tot and the Friedmann equation. */
   }
 
   /* ncdm */
   if (pba->has_ncdm == _TRUE_) {
-  // Get the scalar field value
-      
+
     /* Loop over species: */
     for (n_ncdm=0; n_ncdm<pba->N_ncdm; n_ncdm++) {
-    /* MAVAN Model start - Introduces Meff amd trace_p = rho - 3p and input in class_call(background_ncdm_momenta( instead M_ncdm and the explicit rho -3p term */
-      // Compute effective mass with coupling
-      // Only applies to non-relativistic neutrinos naturally through the momentum integrals
-
-      phi_scf = pvecback[pba->index_bg_phi_scf];
-      Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));
-
-
-    
+      /* Brookfield Eq. (13): compute the mass at the current homogeneous
+         background value phi(a).  The trace in the coupling automatically
+         suppresses the interaction in the relativistic limit. */
+      /* function returning background ncdm[n_ncdm] quantities (only
+         those for which non-NULL pointers are passed) */
+      class_call(background_mavan_effective_mass(
+                                                  pba,
+                                                  n_ncdm,
+                                                  (pba->has_scf == _TRUE_)
+                                                  ? pvecback[pba->index_bg_phi_scf]
+                                                  : 0.0,
+                                                  &Meff),
+                 pba->error_message,
+                 pba->error_message);
       class_call(background_ncdm_momenta(
                                          pba->q_ncdm_bg[n_ncdm],
                                          pba->w_ncdm_bg[n_ncdm],
@@ -528,20 +600,17 @@ int background_functions(
                                          &trace_p),
                  pba->error_message,
                  pba->error_message);
+                 
+/* DIAGNOSTIC - remove after debugging       if (a < 1e-10) {
+            printf("DEBUG a=%.3e: phi=%.6e, beta=%.3e, M_bare=%.6e, Meff=%.6e\n",
+                   a, pvecback[pba->index_bg_phi_scf], pba->beta_ncdm, pba->M_ncdm[n_ncdm], Meff);
+            printf("             rho=%.6e, p=%.6e, w=%.6e, rho-3p=%.6e,trace=%.6e\n",
+                   rho_ncdm, p_ncdm, p_ncdm/rho_ncdm, (rho_ncdm - 3.0*p_ncdm), trace_p);
+        }
 
-     /* DIAGNOSTIC - remove after debugging 
-      if (a < 1e-10) {
-          printf("DEBUG a=%.3e: phi=%.6e, beta=%.3e, M_bare=%.6e, Meff=%.6e",
-                 a, phi, pba->beta_ncdm, pba->M_ncdm[n_ncdm], Meff);
-          printf("               rho=%.6e, p=%.6e, w=%.6e, rho-3p=%.6e\n",
-                       rho_ncdm, p_ncdm, p_ncdm/rho_ncdm, (rho_ncdm-3*p_ncdm));
-      }
-
-      if (a =1) {
-            
-        printf("rho=%.6e, tracep=%.6e, rho-3p=%.6e\n", rho_ncdm, 
-          trace_p, rho_ncdm-3*p_ncdm);
-          }    */
+      if (fabs(a - 1.0) < 1e-4) {
+            printf("TODAY (a=%.3e): rho=%.6e, rho-3p=%.6e, trace=%.6e\n", a, rho_ncdm, rho_ncdm - 3.0*p_ncdm, trace_p );
+        }  */
 
       pvecback[pba->index_bg_rho_ncdm1+n_ncdm] = rho_ncdm;
       rho_tot += rho_ncdm;
@@ -549,12 +618,17 @@ int background_functions(
       p_tot += p_ncdm;
       pvecback[pba->index_bg_pseudo_p_ncdm1+n_ncdm] = pseudo_p_ncdm;
       pvecback[pba->index_bg_trace_p_ncdm1 + n_ncdm] = trace_p;
-
-      /** See e.g. Eq. A6 in 1811.00904. */
-
-      dp_dloga += (pseudo_p_ncdm - 5*p_ncdm); /** <-- This depends on a_prime_over_a, so we cannot add it now! */
-     
-
+      /* Store the total trace for the scalar-sector source below:
+           T_nu = Sum_n (rho_n-3p_n). */
+      trace_ncdm_tot += trace_p;
+      /* Store the distinct moment required by the pressure derivative:
+           p_nu' = Hc*(pseudo_p_nu-5p_nu)
+                   -beta*phi'*(p_nu-pseudo_p_nu),
+         where Hc=aH is the conformal Hubble rate. */
+      p_minus_pseudo_ncdm_tot += p_ncdm-pseudo_p_ncdm;
+      /* Constant-mass contribution to dp_nu/dln(a), identical to CLASS.
+         The varying-mass term is added after H has been calculated. */
+      dp_dloga += pseudo_p_ncdm-5.0*p_ncdm;
       /* (3 p_ncdm1) is the "relativistic" contribution to rho_ncdm1 */
       rho_r += 3.* p_ncdm;
 
@@ -563,8 +637,7 @@ int background_functions(
       rho_m += trace_p;
     }
   }
-  /* MAVAN Model end */
-  
+
   /* Lambda */
   if (pba->has_lambda == _TRUE_) {
     pvecback[pba->index_bg_rho_lambda] = pba->Omega0_lambda * pow(pba->H0,2);
@@ -614,18 +687,27 @@ int background_functions(
       \f$ \rho_{class} = [8 \pi G \rho_{physical} / 3 c^2]\f$ */
   pvecback[pba->index_bg_H] = sqrt(rho_tot-pba->K/a/a);
 
+  /* Divide the conformal-time pressure equation by Hc=aH:
+
+       p_nu' = Hc*(pseudo_p_nu-5p_nu)
+               - beta*phi'*(p_nu-pseudo_p_nu)
+
+       dp_nu/dln(a) = pseudo_p_nu-5p_nu
+                      - beta*phi'/(aH)*(p_nu-pseudo_p_nu).
+
+     This block must be below the Friedmann equation because H was not known
+     inside the ncdm loop.  The beta guard also prevents access to scalar
+     indices in a standard CLASS run without a scalar field. */
+  if ((pba->has_ncdm == _TRUE_) && (pba->beta_ncdm != 0.0)) {
+    dp_dloga -= pba->beta_ncdm
+      *pvecback[pba->index_bg_phi_prime_scf]
+      /(a*pvecback[pba->index_bg_H])
+      *p_minus_pseudo_ncdm_tot;
+  }
+
   /** - compute derivative of H with respect to conformal time */
   pvecback[pba->index_bg_H_prime] = - (3./2.) * (rho_tot + p_tot) * a + pba->K/a;
-  /* Possible MaVaN correction to dp_dloga— applied after H is available 
-  if (pba->has_ncdm == _TRUE_) {
-      for (n_ncdm=0; n_ncdm < pba->N_ncdm; n_ncdm++) {
-           dp_dloga += pvecback[pba->index_bg_pseudo_p_ncdm1+n_ncdm] - 5.0 * pvecback[pba->index_bg_p_ncdm1+n_ncdm] 
-                    - pba->beta_ncdm*(pvecback[pba->index_bg_p_ncdm1+n_ncdm] 
-                    - pvecback[pba->index_bg_pseudo_p_ncdm1+n_ncdm])*pvecback[pba->index_bg_phi_prime_scf]/(a*pvecback[pba->index_bg_H]);
-      }
-  }*/
 
-  
   /* Total energy density*/
   pvecback[pba->index_bg_rho_tot] = rho_tot;
 
@@ -638,6 +720,17 @@ int background_functions(
     /** The contribution of scf was not added to dp_dloga, add p_scf_prime here: */
     pvecback[pba->index_bg_p_prime_scf] = pvecback[pba->index_bg_phi_prime_scf]*
       (-pvecback[pba->index_bg_phi_prime_scf]*pvecback[pba->index_bg_H]/a-2./3.*pvecback[pba->index_bg_dV_scf]);
+    /* Coupled scalar pressure equation in CLASS density units:
+
+         p_phi' = -Hc*phi'^2/a^2 -(2/3)V_,phi*phi'
+                  -beta*phi'*(rho_nu-3p_nu).
+
+       The last term follows by substituting the coupled KG equation into
+       p_phi=[phi'^2/(2a^2)-V]/3.  There is no factor 3 here: the factor 3
+       in the KG source cancels the explicit 1/3 in p_phi. */
+    pvecback[pba->index_bg_p_prime_scf] -= pba->beta_ncdm
+      *pvecback[pba->index_bg_phi_prime_scf]
+      *trace_ncdm_tot;
     pvecback[pba->index_bg_p_tot_prime] += pvecback[pba->index_bg_p_prime_scf];
   }
 
@@ -860,8 +953,6 @@ int background_init(
     printf("Computing background\n");
   }
 
-
-  
   /** - if shooting failed during input, catch the error here */
   class_test(pba->shooting_failed == _TRUE_,
              pba->error_message,
@@ -1103,7 +1194,13 @@ int background_indices(
   class_define_index(pba->index_bg_rho_ncdm1,pba->has_ncdm,index_bg,pba->N_ncdm);
   class_define_index(pba->index_bg_p_ncdm1,pba->has_ncdm,index_bg,pba->N_ncdm);
   class_define_index(pba->index_bg_pseudo_p_ncdm1,pba->has_ncdm,index_bg,pba->N_ncdm);
-  class_define_index(pba->index_bg_trace_p_ncdm1,   pba->has_ncdm, index_bg, pba->N_ncdm); /* MaVaN: rho-3p stable */
+  /* MaVaN source T_nu=rho_nu-3p_nu, stored species by species so that
+     background_derivs() and perturbations.c use the same tabulated trace. */
+  class_define_index(pba->index_bg_trace_p_ncdm1,
+                     pba->has_ncdm,
+                     index_bg,
+                     pba->N_ncdm);
+
   /* - index for dcdm */
   class_define_index(pba->index_bg_rho_dcdm,pba->has_dcdm,index_bg,1);
 
@@ -1641,6 +1738,8 @@ int background_ncdm_init(
  * @param p        Output: pressure
  * @param drho_dM  Output: derivative used in next function
  * @param pseudo_p Output: pseudo-pressure used in perturbation module for fluid approx
+ * @param trace_p  Output: rho-3p evaluated directly, without subtracting two
+ *                         nearly equal relativistic moments
  *
  */
 
@@ -1663,7 +1762,7 @@ int background_ncdm_momenta(
   double epsilon;
   double q2;
   double factor2;
-  double m2;  /* (M/(1+z))^2, computed once and reused */
+  double m2;  /* a^2 M^2=(M/(1+z))^2, computed once and reused */
 
   /** - rescale normalization at given redshift */
   factor2 = factor*pow(1+z,4);
@@ -1690,8 +1789,13 @@ int background_ncdm_momenta(
     if (p!=NULL)       *p       += q2*q2/(3.*epsilon)*wvec[index_q];
     if (drho_dM!=NULL) *drho_dM += q2*M/(1.+z)/(1.+z)/epsilon*wvec[index_q];
     if (pseudo_p!=NULL)*pseudo_p+= pow(q2/epsilon,3)/3.0*wvec[index_q];
-    /** rho-3p = q2*m2/epsilon: exact, no cancellation.
-        → 0 when m→0 (relativistic), → q2*m when m>>q (non-relativistic) */
+    /* From epsilon^2=q^2+a^2 M^2,
+
+         q^2*epsilon - q^4/epsilon = q^2*a^2*M^2/epsilon.
+
+       Thus this integral is exactly rho-3p but avoids catastrophic
+       cancellation when the neutrino is relativistic.  It tends to zero
+       for aM/q -> 0 and to rho for aM/q -> infinity. */
     if (trace_p!=NULL) *trace_p += q2*m2/epsilon*wvec[index_q];
   }
 
@@ -1705,6 +1809,7 @@ int background_ncdm_momenta(
 
   return _SUCCESS_;
 }
+
 /**
  * When the user passed the density fraction Omega_ncdm or
  * omega_ncdm in input but not the mass, infer the mass with Newton iteration method.
@@ -1794,12 +1899,34 @@ int background_checks(
   double rho_ncdm_rel,rho_nu_rel;
   double N_dark;
   double w_fld, dw_over_da, integral_fld;
+  double V0_exponential;
   int filenum=0;
 
   /** - control that we have photons and baryons in the problem */
   class_test((pba->Omega0_g<=0) || (pba->Omega0_b<=0),
              pba->error_message,
              "CLASS is conceived to work in a universe containing at least two species: photons and baryons. You could work in the limit where Omega_g or Omega_b are very small, but not zero");
+
+  /* beta must be a finite constant in m_nu(phi)=m_nu,0 exp[beta(phi-phi_0)]. */
+  class_test(!isfinite(pba->beta_ncdm),
+             pba->error_message,
+             "beta_ncdm must be finite");
+
+  /* A nonzero energy exchange cannot be evaluated unless both sectors exist. */
+  class_test((pba->beta_ncdm != 0.0) &&
+             ((pba->has_scf == _FALSE_) || (pba->has_ncdm == _FALSE_)),
+             pba->error_message,
+             "beta_ncdm != 0 requires both scf and at least one ncdm species");
+
+  if (pba->has_scf == _TRUE_) {
+    
+    double f_pngb = pba->scf_parameters[0];
+    class_test(!isfinite(f_pngb) || f_pngb <= 0.0,
+           pba->error_message,
+           "PNGB decay constant f=scf_parameters[0] must be finite and strictly positive");
+
+ 
+  }
 
   /** - control that cosmological parameter values make sense, otherwise inform user */
 
@@ -1957,9 +2084,21 @@ int background_solve(
 
   /* index of ncdm species */
   int n_ncdm;
-/* MAVAN Model start */
-  double phi;
-/* MAVAN Model end */
+
+  /* Variables used only to impose the present-mass boundary condition
+       phi_0 = phi(a=1; phi_0).
+     They do not introduce a new cosmological degree of freedom. */
+  int mavan_iteration;
+  int mavan_max_iterations;
+  double phi_today_result=0.;
+  double phi_today_residual=0.;
+  double phi_today_tolerance=0.;
+  double phi_today_previous=0.;
+  double phi_today_residual_previous=0.;
+  double phi_today_step=0.;
+  short solve_mavan_phi_today;
+  short have_previous_phi_trial=_FALSE_;
+
   /** - setup background workspace */
   bpaw.pba = pba;
   class_alloc(pvecback,pba->bg_size*sizeof(double),pba->error_message);
@@ -1967,11 +2106,6 @@ int background_solve(
 
   /** - allocate vector of quantities to be integrated */
   class_alloc(pvecback_integration,pba->bi_size*sizeof(double),pba->error_message);
-
-  /** - impose initial conditions with background_initial_conditions() */
-  class_call(background_initial_conditions(ppr,pba,pvecback,pvecback_integration,&(loga_ini)),
-             pba->error_message,
-             pba->error_message);
 
   /** - Determine output vector */
   loga_final = 0.; // with our conventions, loga is in fact log(a/a_0); we integrate until today, when log(a/a_0) = 0
@@ -1989,12 +2123,6 @@ int background_solve(
   class_alloc(pba->d2background_dloga2_table,pba->bt_size * pba->bg_size * sizeof(double),pba->error_message);
 
   class_alloc(used_in_output, pba->bt_size*sizeof(int), pba->error_message);
-
-  /** - define values of loga at which results will be stored */
-  for (index_loga=0; index_loga<pba->bt_size; index_loga++) {
-    pba->loga_table[index_loga] = loga_ini + index_loga*(loga_final-loga_ini)/(pba->bt_size-1);
-    used_in_output[index_loga] = 1;
-  }
 
   /** - choose the right evolver */
   switch (ppr->background_evolver) {
@@ -2014,25 +2142,145 @@ int background_solve(
     break;
   }
 
-  /** - perform the integration */
-  class_call(generic_evolver(background_derivs,
-                             loga_ini,
-                             loga_final,
-                             pvecback_integration,
-                             used_in_output,
-                             pba->bi_size,
-                             &bpaw,
-                             ppr->tol_background_integration,
-                             ppr->smallest_allowed_variation,
-                             background_timescale, //'evaluate_timescale', required by evolver_rk but not by ndf15
-                             ppr->background_integration_stepsize,
-                             pba->loga_table,
-                             pba->bt_size,
-                             background_sources,
-                             NULL, //'print_variables' in evolver_rk could be set, but, not required
-                             pba->error_message),
+  /* The present-mass form of Brookfield Eq. (13) defines M_ncdm through
+
+       M_eff(a=1) = M_ncdm exp[beta(phi_today-phi_0)] = M_ncdm.
+
+     Hence the reference field used during the integration must satisfy
+       F(phi_0) = phi(a=1;phi_0)-phi_0 = 0.
+
+     We preserve the standard CLASS integration call below and repeat it only
+     when beta is nonzero.  beta=0 executes exactly one standard integration. */
+  solve_mavan_phi_today = ((pba->beta_ncdm != 0.0) &&
+                           (pba->has_scf == _TRUE_) &&
+                           (pba->has_ncdm == _TRUE_));
+  mavan_max_iterations = (solve_mavan_phi_today == _TRUE_) ? 20 : 1;
+
+  /* The explicit initial field is a finite, physically nearby first trial
+     for phi_0.  It is only a numerical starting value for the root solve. */
+  if (solve_mavan_phi_today == _TRUE_) {
+    pba->phi_today_scf = pba->phi_ini_scf;
+  }
+
+  for (mavan_iteration=0;
+       mavan_iteration<mavan_max_iterations;
+       mavan_iteration++) {
+
+    /* Restore all CLASS integrated variables to their physical initial
+       conditions before each trial integration. */
+    class_call(background_initial_conditions(ppr,
+                                              pba,
+                                              pvecback,
+                                              pvecback_integration,
+                                              &(loga_ini)),
+               pba->error_message,
+               pba->error_message);
+
+    /* The initial scale factor can depend on the trial mass through the
+       requirement that ncdm start relativistically, so rebuild the grid. */
+    for (index_loga=0; index_loga<pba->bt_size; index_loga++) {
+      pba->loga_table[index_loga] = loga_ini
+        +index_loga*(loga_final-loga_ini)/(pba->bt_size-1);
+      used_in_output[index_loga] = 1;
+    }
+
+    /* This is the unmodified CLASS background evolver call. */
+    class_call(generic_evolver(background_derivs,
+                               loga_ini,
+                               loga_final,
+                               pvecback_integration,
+                               used_in_output,
+                               pba->bi_size,
+                               &bpaw,
+                               ppr->tol_background_integration,
+                               ppr->smallest_allowed_variation,
+                               background_timescale, //'evaluate_timescale', required by evolver_rk but not by ndf15
+                               ppr->background_integration_stepsize,
+                               pba->loga_table,
+                               pba->bt_size,
+                               background_sources,
+                               NULL, //'print_variables' in evolver_rk could be set, but, not required
+                               pba->error_message),
+               pba->error_message,
+               pba->error_message);
+
+    /* No boundary solve is needed in the uncoupled case. */
+    if (solve_mavan_phi_today == _FALSE_) {
+      break;
+    }
+
+    /* The evolver leaves the a=1 state in pvecback_integration. */
+    phi_today_result = pvecback_integration[pba->index_bi_phi_scf];
+
+    /* Root residual F(phi_0)=phi_today(phi_0)-phi_0. */
+    phi_today_residual = phi_today_result-pba->phi_today_scf;
+
+    /* Since the fractional present-mass mismatch is approximately
+         delta M/M = beta*(phi_today-phi_0),
+       divide the field tolerance by |beta| when |beta|>1. */
+    phi_today_tolerance = fmax(1.e-12,
+                               10.*ppr->tol_background_integration)
+      *(1.+fabs(phi_today_result))
+      /fmax(1.,fabs(pba->beta_ncdm));
+
+    if (pba->background_verbose > 2) {
+      printf(" -> MaVaN phi_0 iteration %d: trial=%e result=%e residual=%e\n",
+             mavan_iteration+1,
+             pba->phi_today_scf,
+             phi_today_result,
+             phi_today_residual);
+    }
+
+    /* The present-mass convention is satisfied to the requested tolerance. */
+    if (fabs(phi_today_residual) <= phi_today_tolerance) {
+      break;
+    }
+
+    /* The first update is a damped fixed-point step.  It supplies the two
+       distinct points needed for the secant method on later iterations. */
+    if (have_previous_phi_trial == _FALSE_) {
+      phi_today_previous = pba->phi_today_scf;
+      phi_today_residual_previous = phi_today_residual;
+      phi_today_step = 0.5*phi_today_residual;
+      have_previous_phi_trial = _TRUE_;
+    }
+    else {
+      /* Secant update for F(phi_0)=0; it avoids differentiating a complete
+         CLASS background integration with respect to phi_0. */
+      if (fabs(phi_today_residual-phi_today_residual_previous)
+          > ppr->smallest_allowed_variation) {
+        phi_today_step = -phi_today_residual
+          *(pba->phi_today_scf-phi_today_previous)
+          /(phi_today_residual-phi_today_residual_previous);
+      }
+      else {
+        phi_today_step = 0.5*phi_today_residual;
+      }
+
+      /* Reject a non-finite or very large secant extrapolation and fall back
+         to the damped fixed-point update. */
+      if ((!isfinite(phi_today_step)) ||
+          (fabs(phi_today_step) > 5.0*(1.0+fabs(pba->phi_today_scf)))) {
+        phi_today_step = 0.5*phi_today_residual;
+      }
+
+      /* Save the current point before advancing to the next trial. */
+      phi_today_previous = pba->phi_today_scf;
+      phi_today_residual_previous = phi_today_residual;
+    }
+
+    /* Apply the safeguarded root-solver step to the reference field phi_0. */
+    pba->phi_today_scf += phi_today_step;
+  }
+
+  /* Do not continue with a background whose table and present mass use
+     inconsistent reference fields. */
+  class_test((solve_mavan_phi_today == _TRUE_) &&
+             (mavan_iteration == mavan_max_iterations),
              pba->error_message,
-             pba->error_message);
+             "MaVaN phi_0 normalization did not converge after %d iterations (last residual=%e)",
+             mavan_max_iterations,
+             phi_today_residual);
 
   /** - recover some quantities today */
   /* -> age in Gyears */
@@ -2135,7 +2383,10 @@ int background_solve(
         printf("     -> Omega_Lambda = %g, wished %g\n",
                pba->background_table[(pba->bt_size-1)*pba->bg_size+pba->index_bg_rho_lambda]/pba->background_table[(pba->bt_size-1)*pba->bg_size+pba->index_bg_rho_crit], pba->Omega0_lambda);
       }
-      printf("     -> parameters: [lambda, alpha, A, B] = \n");
+      /* The first two entries are the paper's lambda and log10(V0); with
+         attractor_ic_scf=no the final two are the explicit initial values
+         phi_ini and phi_prime_ini. */
+      printf("     -> exponential MaVaN parameters: [lambda, log10(V0), ..., phi_ini, phi_prime_ini] = \n");
       printf("                    [");
       for (index_scf=0; index_scf<pba->scf_parameters_size-1; index_scf++) {
         printf("%.3f, ",pba->scf_parameters[index_scf]);
@@ -2145,9 +2396,16 @@ int background_solve(
   }
 
   /**  - store information in the background structure */
-  /* MAVAN Model start - store value of phi_today  */
-  pba->phi_today_scf = pba->background_table[(pba->bt_size-1)*pba->bg_size + pba->index_bg_phi_scf];
-  /* MAVAN Model end */
+  /* Store the final homogeneous field as phi_0 for perturbations.  The guard
+     preserves standard CLASS runs with no scalar field, where index_bg_phi_scf
+     does not exist. */
+  if (pba->has_scf == _TRUE_) {
+    pba->phi_today_scf = pba->background_table[
+      (pba->bt_size-1)*pba->bg_size+pba->index_bg_phi_scf];
+  }
+  else {
+    pba->phi_today_scf = 0.0;
+  }
   pba->Omega0_m = pba->background_table[(pba->bt_size-1)*pba->bg_size+pba->index_bg_Omega_m];
   pba->Omega0_r = pba->background_table[(pba->bt_size-1)*pba->bg_size+pba->index_bg_Omega_r];
   pba->Omega0_de = 1. - (pba->Omega0_m + pba->Omega0_r + pba->Omega0_k);
@@ -2161,7 +2419,6 @@ int background_solve(
   if (pba->has_dcdm == _TRUE_)
     pba->Omega0_nfsm += pba->Omega0_dcdm;
   for (n_ncdm=0;n_ncdm<pba->N_ncdm; n_ncdm++) {
-   
     /* here we define non-free-streaming matter as: any non-relatistic species with a dimensionless ratio m/T bigger than a threshold ppr->M_nfsm_threshold; if this threshold is of the order of 10^4, this corresponds to the condition "becoming non-relativistic during radiation domination". Beware: this definition won't work in the case in which the user passes a customised p.s.d. for ncdm, such that M_ncdm is not defined.  */
     if (pba->M_ncdm[n_ncdm] > ppr->M_nfsm_threshold) {
       pba->Omega0_nfsm += pba->Omega0_ncdm[n_ncdm];
@@ -2203,13 +2460,12 @@ int background_initial_conditions(
   double a;
 
   double rho_ncdm, p_ncdm, rho_ncdm_rel_tot=0.;
+  double Meff_ini;
   double f,Omega_rad, rho_rad;
   int counter,is_early_enough,n_ncdm;
   double scf_lambda;
   double rho_fld_today;
   double w_fld,dw_over_da_fld,integral_fld;
-  double phi_scf;
-  double Meff;
 
   /** - fix initial value of \f$ a \f$ */
   a = ppr->a_ini_over_a_today_default;
@@ -2227,12 +2483,24 @@ int background_initial_conditions(
       rho_ncdm_rel_tot = 0.;
 
       for (n_ncdm=0; n_ncdm<pba->N_ncdm; n_ncdm++) {
-        phi_scf = pvecback[pba->index_bg_phi_scf];
-        Meff = pba->M_ncdm[n_ncdm]* exp(pba->beta_ncdm * (phi_scf - pba->phi_today_scf));       
+
+        /* The early-time relativistic test must use the actual mass at
+           phi_ini, not the present mass M_ncdm.  This is Brookfield Eq. (13)
+           evaluated at the initial homogeneous field. */
+        class_call(background_mavan_effective_mass(
+                                                    pba,
+                                                    n_ncdm,
+                                                    (pba->has_scf == _TRUE_)
+                                                    ? pba->phi_ini_scf
+                                                    : 0.0,
+                                                    &Meff_ini),
+                   pba->error_message,
+                   pba->error_message);
+
         class_call(background_ncdm_momenta(pba->q_ncdm_bg[n_ncdm],
                                            pba->w_ncdm_bg[n_ncdm],
                                            pba->q_size_ncdm_bg[n_ncdm],
-                                           Meff,
+                                           Meff_ini,
                                            pba->factor_ncdm[n_ncdm],
                                            1./a-1.0,
                                            NULL,
@@ -2342,17 +2610,17 @@ int background_initial_conditions(
       pvecback_integration[pba->index_bi_phi_prime_scf] = 2.*a*sqrt(V_scf(pba,pvecback_integration[pba->index_bi_phi_scf]))*pba->phi_prime_ini_scf;
     }
     else {
-      
-      /** - --> If no attractor initial conditions are assigned, gets the provided ones. printf("Not using attractor initial conditions\n"); */
+
+      /** - --> If no attractor initial conditions are assigned, gets the provided ones. */
       pvecback_integration[pba->index_bi_phi_scf] = pba->phi_ini_scf;
       pvecback_integration[pba->index_bi_phi_prime_scf] = pba->phi_prime_ini_scf;
     }
     class_test(!isfinite(pvecback_integration[pba->index_bi_phi_scf]) ||
-               !isfinite(pvecback_integration[pba->index_bi_phi_scf]),
+               !isfinite(pvecback_integration[pba->index_bi_phi_prime_scf]),
                pba->error_message,
                "initial phi = %e phi_prime = %e -> check initial conditions",
                pvecback_integration[pba->index_bi_phi_scf],
-               pvecback_integration[pba->index_bi_phi_scf]);
+               pvecback_integration[pba->index_bi_phi_prime_scf]);
   }
 
   /* Infer pvecback from pvecback_integration */
@@ -2395,7 +2663,6 @@ int background_initial_conditions(
   return _SUCCESS_;
 
 }
-
 
 /**
  * Find the time of radiation/matter equality and store characteristic
@@ -2652,25 +2919,30 @@ int background_output_data(
 
 int background_derivs(
                       double loga,
-                      double* y,
-                      double* dy,
+                      double* y, /* vector with argument y[index_bi] (must be already allocated with size pba->bi_size) */
+                      double* dy, /* vector with argument dy[index_bi]
+                                     (must be already allocated with
+                                     size pba->bi_size) */
                       void * parameters_and_workspace,
                       ErrorMsg error_message
                       ) {
 
+  /** Summary: */
+
   /** - define local variables */
+
   struct background_parameters_and_workspace * pbpaw;
   struct background * pba;
   double * pvecback, a, H, rho_M;
-  int n_ncdm; 
+  int n_ncdm;
   pbpaw = parameters_and_workspace;
   pba =  pbpaw->pba;
   pvecback = pbpaw->pvecback;
 
-  /** - scale factor a */
+  /** - scale factor a (in fact, given our normalisation conventions, this stands for a/a_0) */
   a = exp(loga);
 
-  /** - calculate functions of a with background_functions() */
+  /** - calculate functions of \f$ a \f$ with background_functions() */
   class_call(background_functions(pba, a, y, normal_info, pvecback),
              pba->error_message,
              error_message);
@@ -2678,20 +2950,21 @@ int background_derivs(
   /** - Short hand notation for Hubble */
   H = pvecback[pba->index_bg_H];
 
-  /** - calculate derivative of cosmological time */
+  /** - calculate derivative of cosmological time \f$ dt/dloga = 1/H \f$ */
   dy[pba->index_bi_time] = 1./H;
 
-  /** - calculate derivative of conformal time */
+  /** - calculate derivative of conformal time \f$ d\tau/dloga = 1/aH \f$ */
   dy[pba->index_bi_tau] = 1./a/H;
 
   class_test(pvecback[pba->index_bg_rho_g] <= 0.,
              error_message,
              "rho_g = %e instead of strictly positive",pvecback[pba->index_bg_rho_g]);
 
-  /** - calculate derivative of sound horizon */
-  dy[pba->index_bi_rs] = 1./a/H/sqrt(3.*(1.+3.*pvecback[pba->index_bg_rho_b]/4./pvecback[pba->index_bg_rho_g]))*sqrt(1.-pba->K*y[pba->index_bi_rs]*y[pba->index_bi_rs]);
+  /** - calculate detivative of sound horizon \f$ drs/dloga = drs/dtau * dtau/dloga = c_s/aH \f$*/
+  dy[pba->index_bi_rs] = 1./a/H/sqrt(3.*(1.+3.*pvecback[pba->index_bg_rho_b]/4./pvecback[pba->index_bg_rho_g]))*sqrt(1.-pba->K*y[pba->index_bi_rs]*y[pba->index_bi_rs]); // TBC: curvature correction
 
-  /** - solve second order growth equation */
+  /** - solve second order growth equation \f$ [D''(\tau)=-aHD'(\tau)+3/2 a^2 \rho_M D(\tau) \f$
+      written as \f$ dD/dloga = D' / (aH) \f$ and \f$ dD'/dloga = -D' + (3/2) (a/H) \rho_M D \f$ */
   rho_M = pvecback[pba->index_bg_rho_b];
   if (pba->has_cdm == _TRUE_) {
     rho_M += pvecback[pba->index_bg_rho_cdm];
@@ -2704,42 +2977,54 @@ int background_derivs(
   dy[pba->index_bi_D_prime] = -y[pba->index_bi_D_prime] + 1.5*a*rho_M*y[pba->index_bi_D]/H;
 
   if (pba->has_dcdm == _TRUE_) {
+    /** - compute dcdm density \f$ d\rho/dloga = -3 \rho - \Gamma/H \rho \f$*/
     dy[pba->index_bi_rho_dcdm] = -3.*y[pba->index_bi_rho_dcdm] - pba->Gamma_dcdm/H*y[pba->index_bi_rho_dcdm];
   }
 
   if ((pba->has_dcdm == _TRUE_) && (pba->has_dr == _TRUE_)) {
+    /** - Compute dr density \f$ d\rho/dloga = -4\rho - \Gamma/H \rho \f$ */
     dy[pba->index_bi_rho_dr] = -4.*y[pba->index_bi_rho_dr]+pba->Gamma_dcdm/H*y[pba->index_bi_rho_dcdm];
   }
 
   if (pba->has_fld == _TRUE_) {
+    /** - Compute fld density \f$ d\rho/dloga = -3 (1+w_{fld}(a)) \rho \f$ */
     dy[pba->index_bi_rho_fld] = -3.*(1.+pvecback[pba->index_bg_w_fld])*y[pba->index_bi_rho_fld];
   }
 
   if (pba->has_scf == _TRUE_) {
-   /* MAVAN Model start */ /** - Scalar field equation with MaVaN coupling eq 2.8 of https://arxiv.org/pdf/2311.01803*/
-    /** - Scalar field equation: \f$ \phi'' + 2 a H \phi' + a^2 dV = - a^2beta(rho -3p)\f$  (note H is wrt cosmological time)
+    /* Brookfield Eq. (11) is written in conformal time.  With dimensionless
+       phi=phi_phys/M_pl and CLASS densities
+       rho_CLASS=rho_phys/(3 M_pl^2), it becomes
 
-        written as \f$ d\phi/dlna \f$ and \f$ d\phi'/dlna  \f$ */
-    // Compute total ncdm contribution for coupling term
-    dy[pba->index_bi_phi_scf] = y[pba->index_bi_phi_prime_scf]/a/H;
-    /* Read stable rho-3p from pvecback, already computed in background_functions */
+         phi'' + 2*a*H*phi' + a^2*V_,phi
+           = -3*a^2*beta*(rho_nu-3p_nu)_CLASS.
+
+       The factor 3 is required only by CLASS's density normalization. */
     double trace_ncdm = 0.0;
-    if (pba->has_ncdm == _TRUE_) {
-        for (n_ncdm = 0; n_ncdm < pba->N_ncdm; n_ncdm++) {
-            trace_ncdm += pvecback[pba->index_bg_trace_p_ncdm1 + n_ncdm];
-        }
+
+    /* Sum the trace over every ncdm species coupled by the single beta_ncdm. */
+    for (n_ncdm=0; n_ncdm<pba->N_ncdm; n_ncdm++) {
+
+      trace_ncdm += pvecback[pba->index_bg_trace_p_ncdm1+n_ncdm];
     }
-   
-    dy[pba->index_bi_phi_prime_scf] = -2.*y[pba->index_bi_phi_prime_scf]
-                                       - a/H * dV_scf(pba, y[pba->index_bi_phi_scf])
-                                       - a/H * pba->beta_ncdm *trace_ncdm;
+
+    /* Since d/dln(a)=(aH)^(-1)d/dtau,
+         dphi/dln(a) = phi'/(aH). */
+    dy[pba->index_bi_phi_scf] = y[pba->index_bi_phi_prime_scf]/a/H;
+
+    /* Divide the conformal KG equation by aH:
+
+         dphi'/dln(a) = -2phi' -a*V_,phi/H
+                         -3a*beta*(rho_nu-3p_nu)_CLASS/H. */
+    dy[pba->index_bi_phi_prime_scf] =
+      -2.0*y[pba->index_bi_phi_prime_scf]
+      -a*dV_scf(pba,y[pba->index_bi_phi_scf])/H
+      -3.0*a*pba->beta_ncdm*trace_ncdm/H;
   }
-/* MAVAN Model end */
   return _SUCCESS_;
+
 }
 
-
-      
 /**
  * At some step during the integraton of the background equations,
  * this function extracts the qantities that we want to keep memory
@@ -2869,7 +3154,7 @@ int background_output_budget(
   if (pba->background_verbose > 1) {
 
     printf(" ---------------------------- Budget equation ----------------------- \n");
-
+    printf(" -> Omega_m = %f\n",pba->Omega0_m);
     printf(" ---> Nonrelativistic Species \n");
     class_print_species("Bayrons",b);
     budget_matter+=pba->Omega0_b;
@@ -2887,9 +3172,7 @@ int background_output_budget(
     }
 
     if (pba->N_ncdm > 0) {
-      printf(" ---> Non-Cold Dark Matter Species (incl. massive neutrinos)\n"); 
-      printf(" -> Omega_m = %f\n",pba->Omega0_m);
-
+      printf(" ---> Non-Cold Dark Matter Species (incl. massive neutrinos)\n");
     }
     if (pba->N_ncdm > 0) {
       for (index_ncdm=0;index_ncdm<pba->N_ncdm;++index_ncdm) {
@@ -2952,13 +3235,18 @@ int background_output_budget(
   return _SUCCESS_;
 }
 
-
 /**
- * Scalar field potential and its derivatives with respect to the field _scf
- * For Albrecht & Skordis model: 9908085
- * - \f$ V = V_{p_{scf}}*V_{e_{scf}} \f$
- * - \f$ V_e =  \exp(-\lambda \phi) \f$ (exponential)
- * - \f$ V_p = (\phi - B)^\alpha + A \f$ (polynomial bump)
+ * Scalar-field potential and its derivatives with respect to phi.
+ *
+ * Active model in this source (Brookfield et al., Eq. 12):
+ *
+ *   V(phi)      = V0 exp(-sigma phi),
+ *   V_,phi      = -sigma V(phi),
+ *   V_,phiphi   = sigma^2 V(phi),
+ *   sigma       = sqrt(3/2) lambda.
+ *
+ * Together with m_nu(phi)=m_nu,0 exp[beta(phi-phi_0)], this is the model
+ * used in arXiv:astro-ph/0512367v3.
  *
  * TODO:
  * - Add some functionality to include different models/potentials (tuning would be difficult, though)
@@ -2978,114 +3266,113 @@ int background_output_budget(
  * \f$ \rho^{class} = (8 \pi G)/3 \rho^{physical} = 1/(3 m_{pl}^2) \rho^{physical} = 1/3 * [ 1/(2a^2) (\phi')^2 + V(\phi) ] \f$
  and \f$ \rho^{class} \f$ has the proper dimension \f$ Mpc^-2 \f$.
 */
-/* MAVAN Model start - PNGB potential */
-double V_e_scf(struct background *pba,
-               double phi
-               ) {
-  double scf_lambda = pba->scf_parameters[0];
-  double scf_alpha  = pba->scf_parameters[1];
-  double V0 = pow(10,scf_alpha);
-  //  double scf_A      = pba->scf_parameters[2];
-  //  double scf_B      = pba->scf_parameters[3];
-  /* V(phi) = V0 * (cos(phi/A) + 1) */
-  return V0 * (cos(phi / scf_lambda) + 1.0);
-}
-
-double dV_e_scf(struct background *pba,
-                double phi
-                ) {
-  double scf_lambda = pba->scf_parameters[0];
-  double scf_alpha  = pba->scf_parameters[1];
-  double V0 = pow(10,scf_alpha);
-  //  double scf_alpha  = pba->scf_parameters[1];
-  //  double scf_A      = pba->scf_parameters[2];
-  //  double scf_B      = pba->scf_parameters[3];
-  // dV/dphi = -alpha * V0 * phi^(-alpha-1)
-  // Need to preserve sign of phi for the derivative
-
-  /* dV/dphi = - V0 * (1/A) * sin(phi/A) */
-  return - V0 * (1.0 / scf_lambda) * sin(phi / scf_lambda);
-}
-
-
-double ddV_e_scf(struct background *pba,
-                 double phi
-                 ) {
-  double scf_lambda = pba->scf_parameters[0];
-  double scf_alpha  = pba->scf_parameters[1];
-  double V0 = pow(10,scf_alpha);
-
-  //  double scf_alpha  = pba->scf_parameters[1];
-  //  double scf_A      = pba->scf_parameters[2];
-  //  double scf_B      = pba->scf_parameters[3];
-
-  /* d^2V/dphi^2 = - V0 * (1/A^2) * cos(phi/A) */
-  return - V0 * (1.0 / (scf_lambda * scf_lambda)) * cos(phi / scf_lambda);
-}
-
-
-/** parameters and functions for the polynomial coefficient
- * \f$ V_p = (\phi - B)^\alpha + A \f$(polynomial bump)
+/* MaVaN model: active PNGB scalar potential.
  *
- * double scf_alpha = 2;
+ * V(phi) = V0 [1 + cos(phi/f)]
  *
- * double scf_B = 34.8;
- *
- * double scf_A = 0.01; (values for their Figure 2)
+ * Parameter convention:
+ *   scf_parameters[0] = f
+ *   scf_parameters[1] = log10(V0)
+ *   scf_parameters[2] = phi_ini
+ *   scf_parameters[3] = phi_prime_ini
  */
 
-double V_p_scf(
-               struct background *pba,
-               double phi) {
-  //  double scf_lambda = pba->scf_parameters[0];
-  double scf_alpha  = pba->scf_parameters[1];
-  double scf_A      = pba->scf_parameters[2];
-  double scf_B      = pba->scf_parameters[3];
+double V_pngb_scf(struct background *pba,
+                  double phi) {
 
-  return  pow(phi - scf_B,  scf_alpha) +  scf_A;
+  double f = pba->scf_parameters[0];
+  double log10_V0 = pba->scf_parameters[1];
+  double V0 = pow(10.0,log10_V0);
+
+  return V0*(1.0 + cos(phi/f));
 }
 
-double dV_p_scf(
-                struct background *pba,
+
+double dV_pngb_scf(struct background *pba,
+                   double phi) {
+
+  double f = pba->scf_parameters[0];
+  double log10_V0 = pba->scf_parameters[1];
+  double V0 = pow(10.0,log10_V0);
+
+  /* V_,phi = -(V0/f) sin(phi/f). */
+  return -(V0/f)*sin(phi/f);
+}
+
+
+double ddV_pngb_scf(struct background *pba,
+                    double phi) {
+
+  double f = pba->scf_parameters[0];
+  double log10_V0 = pba->scf_parameters[1];
+  double V0 = pow(10.0,log10_V0);
+
+  /* V_,phiphi = -(V0/f^2) cos(phi/f). */
+  return -(V0/(f*f))*cos(phi/f);
+}
+
+
+/**
+ * Legacy Albrecht-Skordis polynomial helpers.
+ *
+ * These functions are inactive because V_scf(), dV_scf() and ddV_scf()
+ * call only the PNGB functions below.
+ */
+
+double V_p_scf(struct background *pba,
+               double phi) {
+
+  double scf_alpha = pba->scf_parameters[1];
+  double scf_A     = pba->scf_parameters[2];
+  double scf_B     = pba->scf_parameters[3];
+
+  return pow(phi-scf_B,scf_alpha)+scf_A;
+}
+
+
+double dV_p_scf(struct background *pba,
                 double phi) {
 
-  //  double scf_lambda = pba->scf_parameters[0];
-  double scf_alpha  = pba->scf_parameters[1];
-  //  double scf_A      = pba->scf_parameters[2];
-  double scf_B      = pba->scf_parameters[3];
+  double scf_alpha = pba->scf_parameters[1];
+  double scf_B     = pba->scf_parameters[3];
 
-  return   scf_alpha*pow(phi -  scf_B,  scf_alpha - 1);
+  return scf_alpha*pow(phi-scf_B,scf_alpha-1.0);
 }
 
-double ddV_p_scf(
-                 struct background *pba,
+
+double ddV_p_scf(struct background *pba,
                  double phi) {
-  //  double scf_lambda = pba->scf_parameters[0];
-  double scf_alpha  = pba->scf_parameters[1];
-  //  double scf_A      = pba->scf_parameters[2];
-  double scf_B      = pba->scf_parameters[3];
 
-  return  scf_alpha*(scf_alpha - 1.)*pow(phi -  scf_B,  scf_alpha - 2);
+  double scf_alpha = pba->scf_parameters[1];
+  double scf_B     = pba->scf_parameters[3];
+
+  return scf_alpha*(scf_alpha-1.0)
+    *pow(phi-scf_B,scf_alpha-2.0);
 }
 
-/** Fianlly we can obtain the overall potential \f$ V = V_p*V_e \f$
+
+/* Active scalar-potential wrappers used by the background and
+ * perturbation modules.
  */
 
-double V_scf(
-             struct background *pba,
+double V_scf(struct background *pba,
              double phi) {
-  return  V_e_scf(pba,phi);
+
+  return V_pngb_scf(pba,phi);
 }
 
-double dV_scf(
-              struct background *pba,
+
+double dV_scf(struct background *pba,
               double phi) {
-  return dV_e_scf(pba,phi);
+
+  return dV_pngb_scf(pba,phi);
 }
 
-double ddV_scf(
-               struct background *pba,
+
+double ddV_scf(struct background *pba,
                double phi) {
-  return ddV_e_scf(pba,phi);
+
+  return ddV_pngb_scf(pba,phi);
 }
-/* MAVAN Model end */
+
+/* End active PNGB MaVaN potential. */
