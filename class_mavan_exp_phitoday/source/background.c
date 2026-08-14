@@ -3035,7 +3035,7 @@ int background_derivs(
     dy[pba->index_bi_phi_prime_scf] =
       -2.0*y[pba->index_bi_phi_prime_scf]
       -a*dV_scf(pba,y[pba->index_bi_phi_scf])/H
-      -3.0*a*pba->beta_ncdm*trace_ncdm/H;
+      -3*a*pba->beta_ncdm*trace_ncdm/H;
   }
   return _SUCCESS_;
 

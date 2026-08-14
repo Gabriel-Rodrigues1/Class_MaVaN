@@ -8689,7 +8689,7 @@ int perturbations_print_variables(double tau,
       if (pba->has_scf == _TRUE_) {
         if (pba->beta_ncdm == 0.0) {
           /* Preserve the native CLASS output transformation exactly. */
-          delta_scf += alpha*(-3.0*H*(1.0+pvecback[pba->index_bg_p_scf]
+          delta_scf += alpha*(-3.0*a*H*(1.0+pvecback[pba->index_bg_p_scf]
                                       /pvecback[pba->index_bg_rho_scf]));
         }
         else {
@@ -9672,7 +9672,7 @@ int perturbations_derivs(double tau,
            beta*delta-phi
            contributions, so no separate beta^2 term is added here. */
         dy[pv->index_pt_phi_prime_scf] -=
-          3.0*a2*pba->beta_ncdm
+          3*a2*pba->beta_ncdm
           *(ppw->rho_delta_ncdm-3.0*ppw->delta_p_ncdm);
       }
 

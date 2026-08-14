@@ -1919,29 +1919,11 @@ int background_checks(
              "beta_ncdm != 0 requires both scf and at least one ncdm species");
 
   if (pba->has_scf == _TRUE_) {
-    /* This source implements the Brookfield et al. exponential potential
 
-         V(phi)=V0 exp[-sqrt(3/2) lambda phi]
-
-       and needs two potential parameters plus the explicit initial values
-       phi_ini and phi'_ini. */
     class_test(pba->scf_parameters_size < 4,
                pba->error_message,
                "the exponential MaVaN model needs scf_parameters = lambda, log10(V0), phi_ini, phi_prime_ini");
 
-
-    /* lambda=0 is valid and gives a constant potential. */
-    class_test(!isfinite(pba->scf_parameters[0]),
-               pba->error_message,
-               "lambda=scf_parameters[0] must be finite");
-
-    /* The second parameter is log10(V0); verify that the conversion used by
-       V_scf(), dV_scf() and ddV_scf() is representable in double precision. */
-    V0_exponential = pow(10.0,pba->scf_parameters[1]);
-    class_test(!isfinite(pba->scf_parameters[1]) ||
-               !isfinite(V0_exponential) || V0_exponential <= 0.0,
-               pba->error_message,
-               "10^log10(V0) must be finite and strictly positive for the exponential potential");
   }
 
   /** - control that cosmological parameter values make sense, otherwise inform user */
@@ -3112,7 +3094,7 @@ int background_derivs(
     dy[pba->index_bi_phi_prime_scf] =
       -2.0*y[pba->index_bi_phi_prime_scf]
       -a*dV_scf(pba,y[pba->index_bi_phi_scf])/H
-      -3.0*a*pba->beta_ncdm*trace_ncdm/H;
+      -3*a*pba->beta_ncdm*trace_ncdm/H;
   }
   return _SUCCESS_;
 
@@ -3367,15 +3349,10 @@ double V_ratra_peebles_scf(struct background *pba,
 
   double alpha = pba->scf_parameters[0];
   double log10_V0 = pba->scf_parameters[1];
-
-  if ((!isfinite(phi)) || (phi <= 0.0) ||
-      (!isfinite(alpha)) || (alpha < 0.0) ||
-      (!isfinite(log10_V0))) {
-    return NAN;
-  }
+  double V0 = pow(10.0,log10_V0);
 
   /* Computing in log space is more stable than V0*pow(phi,-alpha). */
-  return exp(log(10.0)*log10_V0-alpha*log(phi));
+  return V0*pow(phi,-alpha);
 }
 
 
@@ -3383,13 +3360,9 @@ double dV_ratra_peebles_scf(struct background *pba,
                             double phi) {
 
   double alpha = pba->scf_parameters[0];
-  double V;
+  double V = V_ratra_peebles_scf(pba,phi);
 
-  if ((!isfinite(phi)) || (phi <= 0.0)) {
-    return NAN;
-  }
 
-  V = V_ratra_peebles_scf(pba,phi);
 
   return -alpha*V/phi;
 }
@@ -3399,13 +3372,9 @@ double ddV_ratra_peebles_scf(struct background *pba,
                              double phi) {
 
   double alpha = pba->scf_parameters[0];
-  double V;
+  double V = V_ratra_peebles_scf(pba,phi);
 
-  if ((!isfinite(phi)) || (phi <= 0.0)) {
-    return NAN;
-  }
 
-  V = V_ratra_peebles_scf(pba,phi);
 
   return alpha*(alpha+1.0)*V/(phi*phi);
 }

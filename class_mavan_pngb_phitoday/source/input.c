@@ -925,6 +925,164 @@ int input_find_root(double *xzero,
              errmsg,
              errmsg);
 
+  /* Keep a valid fallback value in case a bounded shooting attempt fails.
+     input_shooting() deliberately propagates such failures through
+     pba->shooting_failed; initializing xzero avoids serializing an undefined
+     double while that failure is being propagated to background_init(). */
+  *xzero = x1;
+
+  /**
+   * A nonzero scf_tuning_index is commonly used to shoot on a scalar-field
+   * potential parameter supplied through scf_parameters (for the pNGB MaVaN
+   * model this is log10(V0)).  In that case input_get_guess() deliberately has
+   * no analytic derivative and returns dxdy=1.  The generic one-directional
+   * hunt below can then spend many full background integrations walking in the
+   * wrong direction before it brackets the requested Omega_scf.
+   *
+   * For this 1-D Omega_scf case only, bracket symmetrically around the value
+   * supplied by the user.  The half-width is doubled geometrically.  This is
+   * especially useful in parameter scans: a scf_shooting_parameter close to a
+   * neighbouring model's solution is normally bracketed in the first few
+   * evaluations.  Other CLASS shooting targets keep the standard algorithm.
+   */
+  if ((pfzw->target_size == 1) &&
+      (pfzw->target_name[0] == Omega_scf) &&
+      (fabs(dxdy-1.0) < 10.0*_EPSILON_)) {
+
+    const int max_scf_bracket_iter = 6;
+    double step = 0.25;
+    double xcenter = x1;
+    double fcenter = 0.0;
+    double xleft = 0.0, xright = 0.0;
+    double fleft = 0.0, fright = 0.0;
+    double xleft_inner = 0.0, xright_inner = 0.0;
+    double fleft_inner = 0.0, fright_inner = 0.0;
+    double bracket_x1 = 0.0, bracket_x2 = 0.0;
+    double bracket_f1 = 0.0, bracket_f2 = 0.0;
+    int center_valid = _FALSE_;
+    int left_inner_valid = _FALSE_;
+    int right_inner_valid = _FALSE_;
+    int left_valid, right_valid;
+    int bracket_found = _FALSE_;
+
+    return_function = input_fzerofun_1d(xcenter, pfzw, &fcenter, errmsg);
+    (*fevals)++;
+    if (return_function == _SUCCESS_) {
+      center_valid = _TRUE_;
+      left_inner_valid = _TRUE_;
+      right_inner_valid = _TRUE_;
+      xleft_inner = xcenter;
+      xright_inner = xcenter;
+      fleft_inner = fcenter;
+      fright_inner = fcenter;
+
+      if (fcenter == 0.0) {
+        *xzero = xcenter;
+        return _SUCCESS_;
+      }
+    }
+    else {
+      /* A failed trial is recoverable during bracketing. */
+      errmsg[0] = '\0';
+    }
+
+    for (iter=0; iter<max_scf_bracket_iter; iter++) {
+      xleft = xcenter-step;
+      xright = xcenter+step;
+
+      return_function = input_fzerofun_1d(xleft, pfzw, &fleft, errmsg);
+      (*fevals)++;
+      if (return_function == _SUCCESS_) {
+        left_valid = _TRUE_;
+      }
+      else {
+        left_valid = _FALSE_;
+        errmsg[0] = '\0';
+      }
+
+      return_function = input_fzerofun_1d(xright, pfzw, &fright, errmsg);
+      (*fevals)++;
+      if (return_function == _SUCCESS_) {
+        right_valid = _TRUE_;
+      }
+      else {
+        right_valid = _FALSE_;
+        errmsg[0] = '\0';
+      }
+
+      /* Search outward on the left while retaining the nearest valid point. */
+      if ((left_valid == _TRUE_) && (left_inner_valid == _TRUE_) &&
+          (fleft*fleft_inner <= 0.0)) {
+        bracket_x1 = xleft;
+        bracket_f1 = fleft;
+        bracket_x2 = xleft_inner;
+        bracket_f2 = fleft_inner;
+        bracket_found = _TRUE_;
+      }
+
+      /* Search outward on the right in the same way. */
+      if ((bracket_found == _FALSE_) &&
+          (right_valid == _TRUE_) && (right_inner_valid == _TRUE_) &&
+          (fright*fright_inner <= 0.0)) {
+        bracket_x1 = xright_inner;
+        bracket_f1 = fright_inner;
+        bracket_x2 = xright;
+        bracket_f2 = fright;
+        bracket_found = _TRUE_;
+      }
+
+      /* If the central guess failed, the two valid sides can still bracket. */
+      if ((bracket_found == _FALSE_) && (center_valid == _FALSE_) &&
+          (left_valid == _TRUE_) && (right_valid == _TRUE_) &&
+          (fleft*fright <= 0.0)) {
+        bracket_x1 = xleft;
+        bracket_f1 = fleft;
+        bracket_x2 = xright;
+        bracket_f2 = fright;
+        bracket_found = _TRUE_;
+      }
+
+      if (bracket_found == _TRUE_) {
+        break;
+      }
+
+      if (left_valid == _TRUE_) {
+        xleft_inner = xleft;
+        fleft_inner = fleft;
+        left_inner_valid = _TRUE_;
+      }
+      if (right_valid == _TRUE_) {
+        xright_inner = xright;
+        fright_inner = fright;
+        right_inner_valid = _TRUE_;
+      }
+
+      step *= 2.0;
+    }
+
+    class_test(bracket_found == _FALSE_,
+               errmsg,
+               "could not bracket Omega_scf around scf_shooting_parameter=%g after %d symmetric expansions (last half-width=%g)",
+               xcenter,
+               max_scf_bracket_iter,
+               step/2.0);
+
+    /* Ridders is fast once a valid bracket has been obtained. */
+    class_call(input_fzero_ridder(input_fzerofun_1d,
+                                  bracket_x1,
+                                  bracket_x2,
+                                  tol_x_rel*MAX(fabs(bracket_x1),fabs(bracket_x2)),
+                                  pfzw,
+                                  &bracket_f1,
+                                  &bracket_f2,
+                                  xzero,
+                                  fevals,
+                                  errmsg),
+               errmsg,errmsg);
+
+    return _SUCCESS_;
+  }
+
   class_call(input_fzerofun_1d(x1, pfzw, &f1, errmsg),
              errmsg,
              errmsg);
@@ -1050,19 +1208,52 @@ int input_fzero_ridder(int (*func)(double x,
 
   /** Define local variables */
   int j,MAXIT=1000;
+  int max_total_fevals=-1;
+  struct fzerofun_workspace * pfzw_local=NULL;
   double ans,fh,fl,fm,fnew,s,xh,xl,xm,xnew;
+
+  /*
+   * Fail-fast protection for one-dimensional Omega_scf shooting.
+   *
+   * The generic CLASS Ridders implementation historically allows up to 1000
+   * iterations.  That is useful as a very permissive default, but it is a bad
+   * failure mode for scalar-field scans/MCMC: every function evaluation can
+   * require a complete background integration.  Keep the standard limit for
+   * all other shooting targets and impose a tight budget only for Omega_scf.
+   *
+   * fevals is the total number of CLASS evaluations, including the bracketing
+   * evaluations performed by input_find_root().  Thus the second limit below
+   * bounds the complete 1-D scalar-field shooting attempt, not just Ridders.
+   */
+  if ((func == input_fzerofun_1d) && (param != NULL)) {
+    pfzw_local = (struct fzerofun_workspace *)param;
+    if ((pfzw_local->target_size == 1) &&
+        (pfzw_local->target_name[0] == Omega_scf)) {
+      MAXIT = 20;
+      max_total_fevals = 50;
+    }
+  }
 
   if ((Fx1!=NULL)&&(Fx2!=NULL)){
     fl = *Fx1;
     fh = *Fx2;
   }
   else{
+    class_test((max_total_fevals > 0) && (*fevals >= max_total_fevals),
+               error_message,
+               "Omega_scf shooting exceeded its budget of %d CLASS evaluations before Ridders started",
+               max_total_fevals);
     class_call((*func)(x1, param, &fl, error_message),
                error_message, error_message);
+    (*fevals)++;
+
+    class_test((max_total_fevals > 0) && (*fevals >= max_total_fevals),
+               error_message,
+               "Omega_scf shooting exceeded its budget of %d CLASS evaluations before Ridders started",
+               max_total_fevals);
     class_call((*func)(x2, param, &fh, error_message),
                error_message, error_message);
-
-    *fevals = (*fevals)+2;
+    (*fevals)++;
   }
   if ((fl > 0.0 && fh < 0.0) || (fl < 0.0 && fh > 0.0)) {
     xl=x1;
@@ -1070,6 +1261,11 @@ int input_fzero_ridder(int (*func)(double x,
     ans=-1.11e11;
     for (j=1;j<=MAXIT;j++) {
       xm=0.5*(xl+xh);
+      class_test((max_total_fevals > 0) && (*fevals >= max_total_fevals),
+                 error_message,
+                 "Omega_scf shooting exceeded its budget of %d CLASS evaluations during Ridders iteration %d",
+                 max_total_fevals,
+                 j);
       class_call((*func)(xm, param, &fm, error_message),
                  error_message, error_message);
       *fevals = (*fevals)+1;
@@ -1085,6 +1281,11 @@ int input_fzero_ridder(int (*func)(double x,
       }
 
       ans=xnew;
+      class_test((max_total_fevals > 0) && (*fevals >= max_total_fevals),
+                 error_message,
+                 "Omega_scf shooting exceeded its budget of %d CLASS evaluations during Ridders iteration %d",
+                 max_total_fevals,
+                 j);
       class_call((*func)(ans, param, &fnew, error_message),
                  error_message, error_message);
       *fevals = (*fevals)+1;
@@ -1115,12 +1316,25 @@ int input_fzero_ridder(int (*func)(double x,
         return _SUCCESS_;
       }
     }
+    if (max_total_fevals > 0) {
+      class_stop(error_message,
+                 "Omega_scf Ridders shooting did not converge after %d iterations (%d CLASS evaluations; budget=%d)",
+                 MAXIT,
+                 *fevals,
+                 max_total_fevals);
+    }
     class_stop(error_message,"zriddr exceed maximum iterations");
   }
 
   else {
-    if (fl == 0.0) return x1;
-    if (fh == 0.0) return x2;
+    if (fl == 0.0) {
+      *xzero = x1;
+      return _SUCCESS_;
+    }
+    if (fh == 0.0) {
+      *xzero = x2;
+      return _SUCCESS_;
+    }
     class_stop(error_message,"root must be bracketed in zriddr.");
   }
   class_stop(error_message,"Failure in int.");
@@ -1480,6 +1694,11 @@ int input_try_unknown_parameters(double * unknown_parameter,
     case Omega_scf:
       /** In case scalar field is used to fill, pba->Omega0_scf is not equal to pfzw->target_value[i].*/
       output[i] = ba.background_table[(ba.bt_size-1)*ba.bg_size+ba.index_bg_rho_scf]/(ba.H0*ba.H0)-ba.Omega0_scf;
+      if (input_verbose > 2) {
+        printf(" -> scf shooting evaluation: scf_shooting_parameter = %.12g, residual Omega_scf = %+.12e\n",
+               unknown_parameter[i],
+               output[i]);
+      }
       break;
     case Omega_ini_dcdm:
     case omega_ini_dcdm:
