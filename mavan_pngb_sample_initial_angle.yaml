@@ -1,0 +1,121 @@
+# Free initial field position: phi_ini = f_pngb * theta_ini.
+# A new run is required because the sampled parameter space has changed.
+# Initial velocity remains zero; m_ncdm remains the mass today.
+# The ref and proposal widths below are starting guesses, not tuned results.
+# Check convergence across positive and negative initial angles; for example,
+# also initialize some independent runs with theta_ini ref.loc = -0.4.
+# Replace this path with the extracted repository location.
+theory:
+  classy:
+    path: /home/gabrielrodrigues/class_mavan_pngb_optimized_v3.3.4
+    stop_at_error: false
+    extra_args:
+      N_ncdm: 1
+      N_ur: 2.0308
+      deg_ncdm: 1
+      T_ncdm: 0.71611
+      mavan_ncdm: true
+      # Physical mass at z=0; this value is never shot.
+      m_ncdm: 0.06
+      Omega_Lambda: 0
+      Omega_fld: 0
+      Omega_scf: -1
+      attractor_ic_scf: false
+      scf_tuning_index: 1
+      gauge: synchronous
+      # Use 3 for exact-hierarchy validation and 2 for production chains.
+      ncdm_fluid_approximation: 2
+      non_linear: halofit
+      # Sufficient for the listed CMB+lensing+BAO+SN likelihoods and much
+      # faster than forcing the nonlinear calculation to k=20/Mpc.
+      nonlinear_min_k_max: 5
+
+likelihood:
+  sn.desdovekie: null
+  bao.desi_dr2: null
+  planck_2018_lowl.TT: null
+  planck_2018_lowl.EE: null
+  planck_NPIPE_highl_CamSpec.TTTEEE: null
+  planckpr4lensing:
+    package_install:
+      github_repository: carronj/planck_PR4_lensing
+      min_version: 1.0.2
+
+params:
+  logA:
+    prior: {min: 1.61, max: 3.91}
+    ref: {dist: norm, loc: 3.05, scale: 0.01}
+    proposal: 0.005
+    drop: true
+  A_s:
+    value: 'lambda logA: 1e-10*np.exp(logA)'
+  n_s:
+    prior: {min: 0.8, max: 1.2}
+    ref: {dist: norm, loc: 0.965, scale: 0.004}
+    proposal: 0.002
+  H0:
+    prior: {min: 55, max: 80}
+    ref: {dist: norm, loc: 67.4, scale: 1.0}
+    proposal: 0.5
+  omega_b:
+    prior: {min: 0.005, max: 0.1}
+    ref: {dist: norm, loc: 0.0224, scale: 0.0001}
+    proposal: 0.0001
+  omega_cdm:
+    prior: {min: 0.001, max: 0.99}
+    ref: {dist: norm, loc: 0.120, scale: 0.001}
+    proposal: 0.0005
+  tau_reio:
+    prior: {min: 0.01, max: 0.8}
+    ref: {dist: norm, loc: 0.055, scale: 0.006}
+    proposal: 0.003
+  beta_ncdm:
+    prior: {min: -1.0, max: 6.0}
+    ref: {dist: norm, loc: 0.75, scale: 0.05}
+    proposal: 0.05
+    latex: \beta
+  f_pngb:
+    prior: {min: 0.3, max: 2.0}
+    ref: {dist: norm, loc: 1.0, scale: 0.05}
+    proposal: 0.02
+    drop: true
+    latex: f_{\rm PNGB}
+  # Initial misalignment angle, theta_ini = phi_ini / f_pngb.
+  # Uniform over one full signed period. This prior differs from a flat
+  # prior on phi_ini independent of f_pngb; document it in the paper.
+  theta_ini:
+    prior: {min: -3.141592653589793, max: 3.141592653589793}
+    ref: {dist: norm, loc: 0.4, scale: 0.05}
+    proposal: 0.03
+    drop: true
+    latex: \vartheta_{\rm ini}
+  # Recorded in the chain, not independently passed as a CLASS input.
+  phi_ini:
+    derived: 'lambda f_pngb, theta_ini: f_pngb*theta_ini'
+    latex: \phi_{\rm ini}
+  scf_parameters:
+    value: 'lambda f_pngb, theta_ini: "{:.16g}, -7.0, {:.16g}, 0.0".format(f_pngb, f_pngb*theta_ini)'
+    derived: false
+  Omega_m:
+    latex: \Omega_{\rm m}
+  sigma8:
+    latex: \sigma_8
+  S8:
+    derived: 'lambda sigma8, Omega_m: sigma8*(Omega_m/0.3)**0.5'
+    latex: S_8
+  age:
+    latex: '{\rm Age}/\mathrm{Gyr}'
+  rs_drag:
+    latex: r_{\rm drag}
+
+sampler:
+  mcmc:
+    drag: true
+    oversample_power: 0.4
+    proposal_scale: 1.9
+    covmat: auto
+    Rminus1_stop: 0.01
+    Rminus1_cl_stop: 0.2
+
+output: chains_mavan_desy5/pngb_mavan_desy5_free_initial_angle
+resume: false
