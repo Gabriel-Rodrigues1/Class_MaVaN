@@ -1,4 +1,4 @@
-# Free initial field position: phi_ini = f_pngb * theta_ini.
+_ini f# Free initial field position: phi_ini = f_pngb * theta_ini.
 # A new run is required because the sampled parameter space has changed.
 # Initial velocity remains zero; m_ncdm remains the mass today.
 # The ref and proposal widths below are starting guesses, not tuned results.
@@ -70,32 +70,46 @@ params:
     ref: {dist: norm, loc: 0.055, scale: 0.006}
     proposal: 0.003
   beta_ncdm:
-    prior: {min: -1.0, max: 6.0}
-    ref: {dist: norm, loc: 0.75, scale: 0.05}
+    prior: {min: -10.0, max: 10.0}
+    ref: {dist: norm, loc: 1.5, scale: 1.5}
     proposal: 0.05
     latex: \beta
-  f_pngb:
-    prior: {min: 0.3, max: 2.0}
-    ref: {dist: norm, loc: 1.0, scale: 0.05}
-    proposal: 0.02
+  log_f_pngb:
+    prior:
+      min: -2.302585093
+      max: 1.098612289
+    ref:
+      dist: norm
+      loc: -0.510825624
+      scale: 0.2
+    proposal: 0.1
     drop: true
-    latex: f_{\rm PNGB}
-  # Initial misalignment angle, theta_ini = phi_ini / f_pngb.
-  # Uniform over one full signed period. This prior differs from a flat
-  # prior on phi_ini independent of f_pngb; document it in the paper.
+    latex: \ln f_{\rm PNGB}
+
   theta_ini:
-    prior: {min: -3.141592653589793, max: 3.141592653589793}
-    ref: {dist: norm, loc: 0.4, scale: 0.05}
-    proposal: 0.03
+    prior:
+      min: 0.0
+      max: 3.141592653589793
+    ref:
+      dist: norm
+      loc: 0.7
+      scale: 0.2
+    proposal: 0.1
     drop: true
-    latex: \vartheta_{\rm ini}
-  # Recorded in the chain, not independently passed as a CLASS input.
-  phi_ini:
-    derived: 'lambda f_pngb, theta_ini: f_pngb*theta_ini'
-    latex: \phi_{\rm ini}
+    latex: \theta_{\rm ini}
+
   scf_parameters:
-    value: 'lambda f_pngb, theta_ini: "{:.16g}, -7.0, {:.16g}, 0.0".format(f_pngb, f_pngb*theta_ini)'
+    value: 'lambda log_f_pngb, theta_ini: "{:.16g}, -7.0, {:.16g}, 0.0".format(np.exp(log_f_pngb), np.exp(log_f_pngb)*theta_ini)'
     derived: false
+
+  f_pngb:
+    derived: 'lambda log_f_pngb: np.exp(log_f_pngb)'
+    latex: f_{\rm PNGB}
+
+  phi_ini:
+    derived: 'lambda log_f_pngb, theta_ini: np.exp(log_f_pngb)*theta_ini'
+    latex: \phi_{\rm ini}
+    
   Omega_m:
     latex: \Omega_{\rm m}
   sigma8:
@@ -112,10 +126,10 @@ sampler:
   mcmc:
     drag: true
     oversample_power: 0.4
-    proposal_scale: 1.9
-    covmat: auto
+    proposal_scale: 1.6
+    covmat: pngb_mavan_desy5_phi2.covmat
     Rminus1_stop: 0.01
     Rminus1_cl_stop: 0.2
-
-output: chains_mavan_desy5/pngb_mavan_desy5_free_initial_angle
+    
+output: chains_mavan_desy5_final/pngb_mavan_desy5_final
 resume: false
