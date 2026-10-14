@@ -1,6 +1,6 @@
 # Modified CLASS Code and Cosmological Analysis
 
-This repository contains the **modified CLASS code**, **Cobaya configuration files**, and **analysis scripts** used to obtain the results presented in the paper "Effective Neutrino Mass and Apparent Phantom Crossing" **arXiv:** `[2610.10195](https://arxiv.org/abs/2610.10195)`.
+This repository contains the **modified CLASS code**, **Cobaya configuration files**, and **analysis scripts** used to obtain the results presented in the paper "Effective Neutrino Mass and Apparent Phantom Crossing" **arXiv:** `2610.10195` (https://arxiv.org/abs/2610.10195).
 
 The repository is intended to provide the numerical implementation and analysis pipeline necessary to reproduce the main results of the work.
 
@@ -25,4 +25,4 @@ This work makes use of:
 
 The modifications and analysis material in this repository are provided for scientific and reproducibility purposes. 
 
-If you use substantial parts of the modified code or analysis pipeline, please cite both the associated paper (**arXiv:** `[2610.10195](https://arxiv.org/abs/2610.10195)`) and the original CLASS and Cobaya references where appropriate.
+If you use substantial parts of the modified code or analysis pipeline, please cite both the associated paper **arXiv:** `2610.10195` (https://arxiv.org/abs/2610.10195) and the original CLASS and Cobaya references where appropriate.
